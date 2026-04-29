@@ -5,9 +5,11 @@ Implements the WSO2 Agent Manager standard chat interface:
   Response: {response: string}
 
 Conversation state is tracked server-side, keyed by session_id. The client
-sends one user message per turn. Tool-calling loop uses the OpenAI SDK.
-Defensive at every layer: rate limits and timeouts return a friendly fallback
-message rather than 500-ing.
+sends one user message per turn. Tool-calling runs through LangGraph's
+prebuilt create_react_agent so each LLM call and tool call is a discrete
+OTEL GenAI semconv span in Agent Manager's trace panel.
+Defensive at every layer: rate limits, recursion-limit exhaustion, and
+unhandled exceptions return a friendly fallback rather than 500-ing.
 """
 
 from __future__ import annotations
@@ -22,19 +24,22 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from openai import APIError, OpenAI, RateLimitError
-from pydantic import BaseModel, Field
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
+from langchain_openai import ChatOpenAI
+from langgraph.errors import GraphRecursionError
+from langgraph.prebuilt import create_react_agent
+from openai import APIError, RateLimitError
+from pydantic import BaseModel
 
 from system_prompt import SYSTEM_PROMPT
-from tools import TOOL_SCHEMAS, call_tool
+from tools import LANGCHAIN_TOOLS
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("concierge")
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
-MAX_TOOL_HOPS = 4
 # Cap per-session message history to bound prompt size. A single turn can add
-# 2-4 entries (user, optional assistant tool_calls, tool results, final reply),
+# 2-4 entries (user, optional AI tool_calls, tool results, final reply),
 # so 40 covers ~10 turns comfortably.
 MAX_SESSION_MESSAGES = 40
 FRIENDLY_FALLBACK = (
@@ -43,27 +48,27 @@ FRIENDLY_FALLBACK = (
 
 # In-memory session store. Single-process scope. Multi-replica deploys would
 # need Redis or whatever Agent Manager exposes for shared state.
-SESSIONS: dict[str, list[dict[str, Any]]] = {}
+SESSIONS: dict[str, list[BaseMessage]] = {}
 SESSION_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 # CORS_ALLOW_ORIGINS: comma-separated list of allowed origins for the public widget.
-# Default "*" since the design picked a public scoped endpoint with no auth; tighten
-# in Agent Manager env if a specific hotel website domain is known.
 CORS_ALLOW_ORIGINS = [
     o.strip() for o in os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
 ]
 
 
-_client: OpenAI | None = None
+_agent = None
 
 
-def _get_client() -> OpenAI:
+def _get_agent():
     """Lazy so the module imports cleanly when OPENAI_API_KEY isn't set
-    (CI, linters, local smoke tests of /health)."""
-    global _client
-    if _client is None:
-        _client = OpenAI()
-    return _client
+    (CI, linters, local smoke tests of /health). ChatOpenAI reads the env
+    var on first instantiation, not at import time."""
+    global _agent
+    if _agent is None:
+        llm = ChatOpenAI(model=OPENAI_MODEL)
+        _agent = create_react_agent(llm, tools=LANGCHAIN_TOOLS, prompt=SYSTEM_PROMPT)
+    return _agent
 
 
 app = FastAPI(title="Grand Meridian Concierge")
@@ -91,69 +96,33 @@ def health() -> dict[str, Any]:
     return {"ok": True, "model": OPENAI_MODEL}
 
 
-def _truncate(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Keep the most recent messages, but never split an assistant tool_calls
-    message from its tool results (would produce an invalid prompt)."""
+def _truncate(history: list[BaseMessage]) -> list[BaseMessage]:
+    """Keep the most recent messages, but never start the slice on a
+    ToolMessage (would be orphaned without its preceding AIMessage tool_calls
+    and produce an invalid LangChain prompt)."""
     if len(history) <= MAX_SESSION_MESSAGES:
         return history
     cut = len(history) - MAX_SESSION_MESSAGES
-    while cut < len(history) and history[cut].get("role") == "tool":
+    while cut < len(history) and isinstance(history[cut], ToolMessage):
         cut += 1
     return history[cut:]
 
 
-def _run_loop(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
-    """Run the OpenAI tool-calling loop. Mutates `messages` with assistant
-    and tool entries. Returns (final_reply, mutated_messages)."""
-    for _ in range(MAX_TOOL_HOPS):
-        completion = _get_client().chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=messages,
-            tools=TOOL_SCHEMAS,
-            tool_choice="auto",
-        )
-        msg = completion.choices[0].message
-
-        if msg.tool_calls:
-            messages.append(
-                {
-                    "role": "assistant",
-                    "content": msg.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments,
-                            },
-                        }
-                        for tc in msg.tool_calls
-                    ],
-                }
-            )
-            for tc in msg.tool_calls:
-                try:
-                    args = json.loads(tc.function.arguments or "{}")
-                except json.JSONDecodeError:
-                    args = {}
-                result = call_tool(tc.function.name, args)
-                messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tc.id,
-                        "content": json.dumps(result),
-                    }
-                )
-            continue
-
-        reply = (msg.content or "").strip()
-        if reply:
-            messages.append({"role": "assistant", "content": reply})
-        return (reply or FRIENDLY_FALLBACK), messages
-
-    log.warning("hop budget exceeded")
-    return "I'm still working that out — could you give me a moment and ask again?", messages
+def _final_text(messages: list[BaseMessage]) -> str:
+    """Pull the last AIMessage content from the agent's returned message list."""
+    for msg in reversed(messages):
+        if isinstance(msg, AIMessage):
+            content = msg.content
+            if isinstance(content, str):
+                return content.strip()
+            # content can be a list of content blocks for some providers; flatten.
+            if isinstance(content, list):
+                parts = [
+                    block.get("text", "") if isinstance(block, dict) else str(block)
+                    for block in content
+                ]
+                return "".join(parts).strip()
+    return ""
 
 
 @app.post("/chat", response_model=ChatResponse)
@@ -163,17 +132,13 @@ def chat(req: ChatRequest) -> ChatResponse:
     if not req.message.strip():
         return ChatResponse(response="How can I help you today?")
     if not req.session_id:
-        # Spec says session_id is required. If a client sends "", treat as a
-        # fresh session every turn (no continuity) rather than 400-ing.
         log.warning("empty session_id; conversation continuity disabled for this turn")
 
     sid = req.session_id or "_anonymous_"
 
     with SESSION_LOCKS[sid]:
         history = SESSIONS.get(sid, [])
-        if not history:
-            history.append({"role": "system", "content": SYSTEM_PROMPT})
-        history.append({"role": "user", "content": req.message})
+        history = history + [HumanMessage(content=req.message)]
 
         # `context` is accepted per the contract but not currently injected
         # into the prompt. Logged here so it surfaces in the trace.
@@ -181,7 +146,18 @@ def chat(req: ChatRequest) -> ChatResponse:
             log.info("session=%s context=%s", sid, json.dumps(req.context)[:500])
 
         try:
-            reply, history = _run_loop(history)
+            result = _get_agent().invoke(
+                {"messages": history},
+                config={
+                    "configurable": {"thread_id": sid},
+                    "metadata": {"session_id": sid},
+                },
+            )
+            history = result["messages"]
+            reply = _final_text(history) or FRIENDLY_FALLBACK
+        except GraphRecursionError:
+            log.warning("session=%s langgraph recursion limit exceeded", sid)
+            reply = "I'm still working that out — could you give me a moment and ask again?"
         except RateLimitError:
             log.warning("session=%s openai rate limit", sid)
             reply = FRIENDLY_FALLBACK

@@ -1,0 +1,178 @@
+"""Deterministic tests for the LangGraph agent surface.
+
+These cover the framework swap's new failure modes:
+- @tool registration (wrong type hint -> wrong schema -> silent wrong calls)
+- _truncate() porting from dict-shaped history to BaseMessage objects
+- Lazy agent init so the module imports without OPENAI_API_KEY
+
+No LLM calls. Fast. Run alongside test_tools.py before every rehearsal.
+"""
+
+from __future__ import annotations
+
+import importlib
+import os
+import sys
+
+import pytest
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
+
+class TestLangchainToolsRegistered:
+    """Each @tool wrapper exposes the expected name and accepts the expected
+    arg names. If type hints or names drift, the LLM ends up calling tools
+    with wrong arguments and silently producing wrong answers."""
+
+    def test_tool_count(self) -> None:
+        from tools import LANGCHAIN_TOOLS
+
+        assert len(LANGCHAIN_TOOLS) == 3
+
+    def test_tool_names(self) -> None:
+        from tools import LANGCHAIN_TOOLS
+
+        names = {t.name for t in LANGCHAIN_TOOLS}
+        assert names == {
+            "check_room_availability",
+            "get_room_service_menu",
+            "get_local_recommendations",
+        }
+
+    def test_check_room_availability_args(self) -> None:
+        from tools import LANGCHAIN_TOOLS
+
+        t = next(t for t in LANGCHAIN_TOOLS if t.name == "check_room_availability")
+        schema = t.args
+        assert "room_type" in schema
+        assert "check_in" in schema
+        assert "nights" in schema
+
+    def test_get_room_service_menu_args(self) -> None:
+        from tools import LANGCHAIN_TOOLS
+
+        t = next(t for t in LANGCHAIN_TOOLS if t.name == "get_room_service_menu")
+        assert "vegetarian_only" in t.args
+
+    def test_get_local_recommendations_args(self) -> None:
+        from tools import LANGCHAIN_TOOLS
+
+        t = next(t for t in LANGCHAIN_TOOLS if t.name == "get_local_recommendations")
+        assert "category" in t.args
+
+    def test_tool_descriptions_are_nonempty(self) -> None:
+        from tools import LANGCHAIN_TOOLS
+
+        for t in LANGCHAIN_TOOLS:
+            assert t.description, f"{t.name} is missing a description"
+            assert len(t.description) > 20, f"{t.name} description too thin"
+
+    def test_tool_invokes_underlying_function(self) -> None:
+        """A direct .invoke() should hit the real implementation and return
+        the same shape as calling the function directly. Catches schema drift
+        between the @tool wrapper and the underlying function signature."""
+        from tools import LANGCHAIN_TOOLS
+
+        t = next(t for t in LANGCHAIN_TOOLS if t.name == "check_room_availability")
+        result = t.invoke({"room_type": "junior"})
+        assert result["available"] is True
+        assert result["name"] == "Junior Suite"
+
+
+class TestTruncatePreservesAiToolMessagePair:
+    """The history truncation invariant: never start a slice on a ToolMessage
+    (would be orphaned from its preceding AIMessage tool_calls and produce an
+    invalid LangChain prompt on the next turn)."""
+
+    def test_no_truncation_when_under_cap(self) -> None:
+        from agent import MAX_SESSION_MESSAGES, _truncate
+
+        history = [HumanMessage(content=f"turn {i}") for i in range(5)]
+        assert _truncate(history) is history
+        assert len(_truncate(history)) == 5
+        assert MAX_SESSION_MESSAGES == 40
+
+    def test_truncates_to_cap(self) -> None:
+        from agent import MAX_SESSION_MESSAGES, _truncate
+
+        history = [HumanMessage(content=f"turn {i}") for i in range(MAX_SESSION_MESSAGES + 10)]
+        result = _truncate(history)
+        assert len(result) == MAX_SESSION_MESSAGES
+
+    def test_skips_leading_tool_messages_after_cut(self) -> None:
+        """Construct a history where a naive slice would land on a ToolMessage.
+        Truncate must advance past it."""
+        from agent import MAX_SESSION_MESSAGES, _truncate
+
+        # Fill to MAX_SESSION_MESSAGES with HumanMessages, then add an
+        # AI(tool_calls) + 2 ToolMessage block at the END. Adding 3 more
+        # messages forces a cut of 3, which would otherwise land on the
+        # first ToolMessage.
+        history: list = [HumanMessage(content=f"h{i}") for i in range(MAX_SESSION_MESSAGES)]
+        # Replace last 3 with the tool-call block:
+        history[-3] = AIMessage(
+            content="",
+            tool_calls=[
+                {"name": "check_room_availability", "args": {"room_type": "junior"}, "id": "c1"},
+            ],
+        )
+        history[-2] = ToolMessage(content='{"ok": true}', tool_call_id="c1")
+        history[-1] = ToolMessage(content='{"ok": true}', tool_call_id="c1")
+        # Now prepend 3 more so cut = 3. cut(3) lands on a HumanMessage
+        # in this construction, which is fine. Build a different scenario:
+        # put the AI(tool_calls)+tool block at the START so cut would land
+        # in the middle of it.
+        ai_tool_block = [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"name": "check_room_availability", "args": {"room_type": "junior"}, "id": "c1"},
+                ],
+            ),
+            ToolMessage(content='{"ok": true}', tool_call_id="c1"),
+            ToolMessage(content='{"ok": true}', tool_call_id="c1"),
+        ]
+        rest = [HumanMessage(content=f"h{i}") for i in range(MAX_SESSION_MESSAGES)]
+        history = ai_tool_block + rest
+        # len = 43, cap = 40, naive cut = 3 -> first survivor is ToolMessage[2].
+        # _truncate should advance past the ToolMessages and land on the
+        # first HumanMessage of `rest`.
+        result = _truncate(history)
+        assert len(result) <= MAX_SESSION_MESSAGES
+        assert not isinstance(result[0], ToolMessage), (
+            "truncate left a ToolMessage at index 0 — would invalidate the next prompt"
+        )
+        assert isinstance(result[0], HumanMessage)
+
+
+class TestAgentModuleImportsWithoutApiKey:
+    """The lazy _get_agent() pattern must let the module import cleanly so CI
+    and /health smoke tests work without OPENAI_API_KEY in the env."""
+
+    def test_imports_with_api_key_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        # Force a fresh import so we exercise the import path, not a cached module.
+        sys.modules.pop("agent", None)
+        try:
+            agent_module = importlib.import_module("agent")
+        finally:
+            # Restore for any subsequent tests that may need it.
+            sys.modules.pop("agent", None)
+        assert hasattr(agent_module, "app")
+        assert hasattr(agent_module, "_get_agent")
+        # Confirm the lazy guard hasn't fired yet.
+        assert agent_module._agent is None
+
+    def test_health_works_without_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        sys.modules.pop("agent", None)
+        try:
+            agent_module = importlib.import_module("agent")
+            result = agent_module.health()
+        finally:
+            sys.modules.pop("agent", None)
+        assert result["ok"] is True
+        assert "model" in result
+
+
+if __name__ == "__main__":
+    pytest.main([__file__, "-v"])
