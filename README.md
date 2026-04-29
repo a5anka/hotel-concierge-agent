@@ -8,17 +8,31 @@ hotel landing page through a vanilla JS chat widget.
 
 ```
 .
-├── agent.py            FastAPI app exposing POST /chat. Stateless tool-calling loop.
+├── main.py             Entry point. Agent Manager start command: `python main.py`.
+├── agent.py            FastAPI app + tool-calling loop. POST /chat keyed by session_id.
 ├── tools.py            3 hotel tools + dispatch table.
 ├── hotel_data.py       Single source of truth for rooms, menu, recommendations.
 ├── system_prompt.py    Concierge persona + locked graceful-degradation phrasing.
 ├── requirements.txt    openai, fastapi, uvicorn, pytest.
-├── tests/test_tools.py 13 unit tests, ~1 second to run.
+├── tests/test_tools.py 16 unit tests, ~1 second to run.
 ├── web/
 │   ├── index.html      "The Grand Meridian" landing page (Tailwind via CDN).
 │   └── widget.js       Vanilla JS chat widget, ~250 lines, no build step.
 └── TODOS.md            Pre-flight tasks (hello-world deploy validation).
 ```
+
+## Chat interface (Agent Manager standard)
+
+```
+POST /chat   (port 8000)
+Request:  {"message": "string", "session_id": "string", "context": {}}
+Response: {"response": "string"}
+```
+
+Conversation state is kept server-side, keyed by `session_id`. Send one user
+message per turn; the server stitches the thread together. `context` is
+accepted per the contract and logged into the trace, but not currently
+injected into the prompt.
 
 ## Run locally
 
@@ -38,16 +52,26 @@ Start the agent server:
 ```bash
 export OPENAI_API_KEY=sk-...
 export OPENAI_MODEL=gpt-4o
-python agent.py
+python main.py
 # → listening on http://localhost:8000
 ```
 
 Smoke-test from another terminal:
 ```bash
 curl -s http://localhost:8000/health
+
 curl -s -X POST http://localhost:8000/chat \
   -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"Is the honeymoon suite available the first weekend in June?"}]}' | jq
+  -d '{
+    "message": "Is the honeymoon suite available the first weekend in June?",
+    "session_id": "smoke-test-1",
+    "context": {}
+  }' | jq
+
+# Reuse the same session_id to continue the conversation:
+curl -s -X POST http://localhost:8000/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "What about for three nights?", "session_id": "smoke-test-1", "context": {}}' | jq
 ```
 
 Serve the hotel website (separate terminal — agent is already on `:8000`):
@@ -63,18 +87,29 @@ defaults to `*`, so the cross-port request works without further config.
 
 ## Deploy to Agent Manager
 
-1. **Pre-flight (see `TODOS.md`):** push a hello-world `print("hello")` agent
-   first to verify Agent Manager's expected repo layout. This codebase assumes
-   standard Python: `agent.py` as entry point, `requirements.txt` for deps.
-2. Push this repo to GitHub.
-3. In Agent Manager: Connect Repository → enter the GitHub URL.
-4. Configure env vars in Agent Manager's UI:
+Settings (matching the standard Platform-Hosted Agent form):
+
+| Field             | Value                                                     |
+|-------------------|-----------------------------------------------------------|
+| Display Name      | `Grand Meridian Concierge`                                |
+| GitHub Repository | `https://github.com/a5anka/hotel-concierge-agent`         |
+| Branch            | `main`                                                    |
+| App Path          | `.` (repo root)                                           |
+| Language          | `Python`                                                  |
+| Language Version  | `3.11`                                                    |
+| Start Command     | `python main.py`                                          |
+| Agent Interface   | `Chat Agent` (POST /chat, port 8000)                      |
+
+Steps:
+
+1. In Agent Manager: Add Agent → Platform-Hosted Agent → fill the form above.
+2. Configure env vars:
    - `OPENAI_API_KEY` (secret)
    - `OPENAI_MODEL=gpt-4o`
    - `CORS_ALLOW_ORIGINS=*` (or the specific hotel website origin)
    - `PORT` is set automatically by Agent Manager.
-5. Deploy. Endpoint will be exposed at the URL Agent Manager assigns.
-6. Update `web/index.html`'s `window.GRAND_MERIDIAN_AGENT_URL` to that URL.
+3. Deploy. Endpoint will be exposed at the URL Agent Manager assigns.
+4. Update `web/index.html`'s `window.GRAND_MERIDIAN_AGENT_URL` to that URL.
 
 ## The 10 scripted demo questions
 

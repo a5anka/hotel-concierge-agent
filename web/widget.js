@@ -15,8 +15,11 @@
     "Welcome to The Grand Meridian. How can I help you today? I can check availability, share our menus, or recommend something nearby.";
   const CHIPS = ["Check availability", "Room service", "Things to do nearby"];
 
-  // Conversation history sent with every request. Stateless server.
-  const history = [];
+  // One session per page load. Server tracks conversation state keyed by this id.
+  const SESSION_ID =
+    (typeof crypto !== "undefined" && crypto.randomUUID)
+      ? crypto.randomUUID()
+      : `gm-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
   // ---- DOM construction ----
   const root = document.getElementById("concierge-widget");
@@ -249,7 +252,6 @@
 
   async function send(text) {
     renderUser(text);
-    history.push({ role: "user", content: text });
     setSendingState(true);
     const typing = renderTyping();
 
@@ -257,24 +259,25 @@
       const res = await fetch(ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ messages: history }),
+        body: JSON.stringify({
+          message: text,
+          session_id: SESSION_ID,
+          context: {},
+        }),
       });
       typing.remove();
       if (!res.ok) {
         showToast(`Concierge offline (${res.status}). Retry?`);
-        history.pop();
         setSendingState(false);
         return;
       }
       const data = await res.json();
-      const reply = (data && data.reply) || "I'm having trouble — could you try again?";
-      history.push({ role: "assistant", content: reply });
+      const reply = (data && data.response) || "I'm having trouble — could you try again?";
       renderBot(reply);
     } catch (err) {
       typing.remove();
       console.warn("widget send failed", err);
       showToast("Concierge offline. Retry?");
-      history.pop();
     } finally {
       setSendingState(false);
       input.focus();

@@ -1,8 +1,13 @@
 """Hotel concierge agent — FastAPI service exposing POST /chat.
 
-Stateless: the client sends the full message history with each request.
-Tool-calling loop uses the OpenAI SDK. Defensive at every layer: rate limits
-and timeouts return a friendly fallback message rather than 500-ing.
+Implements the WSO2 Agent Manager standard chat interface:
+  Request:  {message: string, session_id: string, context: JSON}
+  Response: {response: string}
+
+Conversation state is tracked server-side, keyed by session_id. The client
+sends one user message per turn. Tool-calling loop uses the OpenAI SDK.
+Defensive at every layer: rate limits and timeouts return a friendly fallback
+message rather than 500-ing.
 """
 
 from __future__ import annotations
@@ -10,7 +15,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
+from collections import defaultdict
 from typing import Any
 
 from fastapi import FastAPI
@@ -26,9 +33,18 @@ log = logging.getLogger("concierge")
 
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-4o")
 MAX_TOOL_HOPS = 4
+# Cap per-session message history to bound prompt size. A single turn can add
+# 2-4 entries (user, optional assistant tool_calls, tool results, final reply),
+# so 40 covers ~10 turns comfortably.
+MAX_SESSION_MESSAGES = 40
 FRIENDLY_FALLBACK = (
     "I'm having trouble reaching our systems right now — could you try that again in a moment?"
 )
+
+# In-memory session store. Single-process scope. Multi-replica deploys would
+# need Redis or whatever Agent Manager exposes for shared state.
+SESSIONS: dict[str, list[dict[str, Any]]] = {}
+SESSION_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
 # CORS_ALLOW_ORIGINS: comma-separated list of allowed origins for the public widget.
 # Default "*" since the design picked a public scoped endpoint with no auth; tighten
@@ -38,7 +54,18 @@ CORS_ALLOW_ORIGINS = [
 ]
 
 
-client = OpenAI()
+_client: OpenAI | None = None
+
+
+def _get_client() -> OpenAI:
+    """Lazy so the module imports cleanly when OPENAI_API_KEY isn't set
+    (CI, linters, local smoke tests of /health)."""
+    global _client
+    if _client is None:
+        _client = OpenAI()
+    return _client
+
+
 app = FastAPI(title="Grand Meridian Concierge")
 app.add_middleware(
     CORSMiddleware,
@@ -49,20 +76,14 @@ app.add_middleware(
 )
 
 
-class Message(BaseModel):
-    role: str
-    content: str | None = None
-
-
 class ChatRequest(BaseModel):
-    messages: list[Message] = Field(default_factory=list)
+    message: str
+    session_id: str
+    context: dict[str, Any] | None = None
 
 
 class ChatResponse(BaseModel):
-    reply: str
-    tool_calls: list[dict[str, Any]] = Field(default_factory=list)
-    latency_ms: int
-    model: str
+    response: str
 
 
 @app.get("/health")
@@ -70,122 +91,116 @@ def health() -> dict[str, Any]:
     return {"ok": True, "model": OPENAI_MODEL}
 
 
+def _truncate(history: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep the most recent messages, but never split an assistant tool_calls
+    message from its tool results (would produce an invalid prompt)."""
+    if len(history) <= MAX_SESSION_MESSAGES:
+        return history
+    cut = len(history) - MAX_SESSION_MESSAGES
+    while cut < len(history) and history[cut].get("role") == "tool":
+        cut += 1
+    return history[cut:]
+
+
+def _run_loop(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+    """Run the OpenAI tool-calling loop. Mutates `messages` with assistant
+    and tool entries. Returns (final_reply, mutated_messages)."""
+    for _ in range(MAX_TOOL_HOPS):
+        completion = _get_client().chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=messages,
+            tools=TOOL_SCHEMAS,
+            tool_choice="auto",
+        )
+        msg = completion.choices[0].message
+
+        if msg.tool_calls:
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": msg.content or "",
+                    "tool_calls": [
+                        {
+                            "id": tc.id,
+                            "type": "function",
+                            "function": {
+                                "name": tc.function.name,
+                                "arguments": tc.function.arguments,
+                            },
+                        }
+                        for tc in msg.tool_calls
+                    ],
+                }
+            )
+            for tc in msg.tool_calls:
+                try:
+                    args = json.loads(tc.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                result = call_tool(tc.function.name, args)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tc.id,
+                        "content": json.dumps(result),
+                    }
+                )
+            continue
+
+        reply = (msg.content or "").strip()
+        if reply:
+            messages.append({"role": "assistant", "content": reply})
+        return (reply or FRIENDLY_FALLBACK), messages
+
+    log.warning("hop budget exceeded")
+    return "I'm still working that out — could you give me a moment and ask again?", messages
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(req: ChatRequest) -> ChatResponse:
     started = time.perf_counter()
 
-    # Always prepend the system prompt; ignore any system message the client sent.
-    messages: list[dict[str, Any]] = [{"role": "system", "content": SYSTEM_PROMPT}]
-    for m in req.messages:
-        if m.role == "system":
-            continue
-        if m.role not in ("user", "assistant", "tool"):
-            continue
-        messages.append({"role": m.role, "content": m.content or ""})
+    if not req.message.strip():
+        return ChatResponse(response="How can I help you today?")
+    if not req.session_id:
+        # Spec says session_id is required. If a client sends "", treat as a
+        # fresh session every turn (no continuity) rather than 400-ing.
+        log.warning("empty session_id; conversation continuity disabled for this turn")
 
-    if not any(m["role"] == "user" for m in messages):
-        return ChatResponse(
-            reply="How can I help you today?",
-            tool_calls=[],
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            model=OPENAI_MODEL,
-        )
+    sid = req.session_id or "_anonymous_"
 
-    tool_calls_log: list[dict[str, Any]] = []
+    with SESSION_LOCKS[sid]:
+        history = SESSIONS.get(sid, [])
+        if not history:
+            history.append({"role": "system", "content": SYSTEM_PROMPT})
+        history.append({"role": "user", "content": req.message})
 
-    try:
-        for hop in range(MAX_TOOL_HOPS):
-            completion = client.chat.completions.create(
-                model=OPENAI_MODEL,
-                messages=messages,
-                tools=TOOL_SCHEMAS,
-                tool_choice="auto",
-            )
-            choice = completion.choices[0]
-            msg = choice.message
+        # `context` is accepted per the contract but not currently injected
+        # into the prompt. Logged here so it surfaces in the trace.
+        if req.context:
+            log.info("session=%s context=%s", sid, json.dumps(req.context)[:500])
 
-            if msg.tool_calls:
-                # Append the assistant's tool-call message verbatim so the next
-                # round can see what was requested.
-                messages.append(
-                    {
-                        "role": "assistant",
-                        "content": msg.content or "",
-                        "tool_calls": [
-                            {
-                                "id": tc.id,
-                                "type": "function",
-                                "function": {
-                                    "name": tc.function.name,
-                                    "arguments": tc.function.arguments,
-                                },
-                            }
-                            for tc in msg.tool_calls
-                        ],
-                    }
-                )
-                for tc in msg.tool_calls:
-                    name = tc.function.name
-                    raw_args = tc.function.arguments or "{}"
-                    try:
-                        args = json.loads(raw_args)
-                    except json.JSONDecodeError:
-                        args = {}
-                    result = call_tool(name, args)
-                    tool_calls_log.append({"name": name, "arguments": args, "result": result})
-                    messages.append(
-                        {
-                            "role": "tool",
-                            "tool_call_id": tc.id,
-                            "content": json.dumps(result),
-                        }
-                    )
-                continue
+        try:
+            reply, history = _run_loop(history)
+        except RateLimitError:
+            log.warning("session=%s openai rate limit", sid)
+            reply = FRIENDLY_FALLBACK
+        except APIError as e:
+            log.warning("session=%s openai api error: %s", sid, e)
+            reply = FRIENDLY_FALLBACK
+        except Exception as e:
+            log.exception("session=%s unhandled error in /chat: %s", sid, e)
+            reply = FRIENDLY_FALLBACK
 
-            # No tool calls — this is the final answer.
-            reply = (msg.content or "").strip()
-            if not reply:
-                reply = FRIENDLY_FALLBACK
-            return ChatResponse(
-                reply=reply,
-                tool_calls=tool_calls_log,
-                latency_ms=int((time.perf_counter() - started) * 1000),
-                model=OPENAI_MODEL,
-            )
+        SESSIONS[sid] = _truncate(history)
 
-        # Hit the hop budget without a final assistant message.
-        log.warning("hop budget exceeded with %d tool calls", len(tool_calls_log))
-        return ChatResponse(
-            reply="I'm still working that out — could you give me a moment and ask again?",
-            tool_calls=tool_calls_log,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            model=OPENAI_MODEL,
-        )
-
-    except RateLimitError:
-        log.warning("openai rate limit")
-        return ChatResponse(
-            reply=FRIENDLY_FALLBACK,
-            tool_calls=tool_calls_log,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            model=OPENAI_MODEL,
-        )
-    except APIError as e:
-        log.warning("openai api error: %s", e)
-        return ChatResponse(
-            reply=FRIENDLY_FALLBACK,
-            tool_calls=tool_calls_log,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            model=OPENAI_MODEL,
-        )
-    except Exception as e:
-        log.exception("unhandled error in /chat: %s", e)
-        return ChatResponse(
-            reply=FRIENDLY_FALLBACK,
-            tool_calls=tool_calls_log,
-            latency_ms=int((time.perf_counter() - started) * 1000),
-            model=OPENAI_MODEL,
-        )
+    log.info(
+        "session=%s reply_chars=%d elapsed_ms=%d",
+        sid,
+        len(reply),
+        int((time.perf_counter() - started) * 1000),
+    )
+    return ChatResponse(response=reply)
 
 
 if __name__ == "__main__":
