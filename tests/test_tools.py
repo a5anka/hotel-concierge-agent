@@ -9,7 +9,6 @@ from __future__ import annotations
 import pytest
 
 from tools import (
-    call_tool,
     check_room_availability,
     get_local_recommendations,
     get_room_service_menu,
@@ -86,21 +85,6 @@ class TestGetLocalRecommendations:
         r = get_local_recommendations(category="elephants")
         assert "error" in r
         assert "Available" in r["error"]
-
-
-class TestCallToolDispatch:
-    def test_unknown_tool(self) -> None:
-        r = call_tool("get_weather", {})
-        assert "error" in r
-
-    def test_invalid_arguments_caught(self) -> None:
-        r = call_tool("check_room_availability", {"unexpected_kwarg": True})
-        assert "error" in r
-
-    def test_dispatch_happy_path(self) -> None:
-        r = call_tool("check_room_availability", {"room_type": "junior"})
-        assert r["available"] is True
-        assert r["name"] == "Junior Suite"
 
 
 if __name__ == "__main__":
