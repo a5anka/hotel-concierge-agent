@@ -38,7 +38,7 @@
     box-shadow:0 12px 30px rgba(27,43,75,0.35);display:flex;align-items:center;justify-content:center;
     transition:transform 0.18s ease;
   `;
-  launcher.innerHTML = "&#10024;";
+  launcher.innerHTML = `<svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#C9A84C" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>`;
   launcher.addEventListener("mouseenter", () => (launcher.style.transform = "scale(1.05)"));
   launcher.addEventListener("mouseleave", () => (launcher.style.transform = "scale(1)"));
   wrapper.appendChild(launcher);
@@ -60,8 +60,10 @@
     display:flex;align-items:center;gap:12px;flex-shrink:0;
   `;
   head.innerHTML = `
-    <div style="width:28px;height:28px;border-radius:50%;background:#C9A84C;color:#1B2B4B;
-                display:flex;align-items:center;justify-content:center;font-size:14px;">&#10024;</div>
+    <div style="width:28px;height:28px;border-radius:50%;background:#C9A84C;
+                display:flex;align-items:center;justify-content:center;">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#1B2B4B" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+    </div>
     <div style="display:flex;flex-direction:column;line-height:1.2;">
       <div style="font-family:'Playfair Display',serif;font-size:16px;font-weight:600;letter-spacing:0.02em;">
         Ask our concierge

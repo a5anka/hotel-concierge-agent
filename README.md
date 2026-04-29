@@ -50,19 +50,16 @@ curl -s -X POST http://localhost:8000/chat \
   -d '{"messages":[{"role":"user","content":"Is the honeymoon suite available the first weekend in June?"}]}' | jq
 ```
 
-Serve the hotel website (separate terminal):
+Serve the hotel website (separate terminal — agent is already on `:8000`):
 ```bash
 cd web/
-python3 -m http.server 8000
-# Note: this conflicts with the agent on port 8000.
-# Use a different port for the website:
 python3 -m http.server 5500
 # → open http://localhost:5500
 ```
 
-If the agent is on `:8000` and the website on `:5500`, edit `web/index.html`'s
-`window.GRAND_MERIDIAN_AGENT_URL` to point at `http://localhost:8000/chat`. CORS
-on the agent defaults to `*` so this works locally without further config.
+`web/index.html` already points `window.GRAND_MERIDIAN_AGENT_URL` at
+`http://localhost:8000/chat`, so no edit needed for local dev. CORS on the agent
+defaults to `*`, so the cross-port request works without further config.
 
 ## Deploy to Agent Manager
 
