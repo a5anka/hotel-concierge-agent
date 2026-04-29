@@ -13,7 +13,6 @@ from langchain_core.tools import tool
 
 from hotel_data import (
     MENU,
-    POOL_HOURS,
     RECOMMENDATIONS,
     ROOMS,
 )
@@ -121,5 +120,4 @@ __all__ = [
     "check_room_availability",
     "get_room_service_menu",
     "get_local_recommendations",
-    "POOL_HOURS",
 ]
