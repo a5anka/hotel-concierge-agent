@@ -10,6 +10,7 @@ import os
 
 import uvicorn
 
+import tracing  # noqa: F401  must run before `import agent` so the LangChain instrumentor wraps BaseCallbackManager.__init__ before langchain_core loads
 from agent import app
 
 if __name__ == "__main__":

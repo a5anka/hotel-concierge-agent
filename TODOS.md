@@ -15,3 +15,23 @@
 **Depends on / blocked by:** Agent Manager access, ability to create a throwaway GitHub repo.
 
 **When to do this:** Before Day 1 morning build, OR the moment Day 1 morning's real-agent deploy fails for a structural reason.
+
+**Status (2026-04-30):** Done. Real agent shipped, pre-flight assumption held.
+
+## Drop `wrapt<2` pin once upstream ships fix
+
+**What:** Remove the `wrapt<2` pin in `requirements.txt` and let it resolve to wrapt 2.x.
+
+**Why:** The pin is load-bearing today because no released `opentelemetry-instrumentation-langchain` handles wrapt 2.x. Once upstream ships the fix, the pin becomes dead weight and blocks adopting any future dep that requires wrapt 2.x.
+
+**Unblock conditions (all four must hold):**
+1. openllmetry PR #4048 OR #4025 merges — https://github.com/traceloop/openllmetry/pull/4048 / https://github.com/traceloop/openllmetry/pull/4025
+2. `opentelemetry-instrumentation-langchain` cuts a release that includes the fix (was 0.60.0 on 2026-04-19; check pypi for ≥0.61.x).
+3. `traceloop-sdk` re-pins to that release.
+4. We bump our pinned `traceloop-sdk` version in `requirements.txt` and verify the LangChain instrumentor initializes under wrapt 2.x.
+
+**Context:** See the memory file `project_amp_instrumentation_wrapt_pin.md` for full background. Issue traceloop/openllmetry#4009 was filed 2026-04-16 and has been open ~2 weeks. CodeRabbit was still iterating on review feedback as of 2026-04-29.
+
+**Verify after unpinning:** Redeploy with auto-instrumentation OFF, run Q10 against the deployed instance, confirm trace panel shows nested LangGraph spans + tool spans. If broken, revert.
+
+**Depends on / blocked by:** Upstream merges + releases. No internal blockers.

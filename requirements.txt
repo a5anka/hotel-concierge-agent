@@ -7,13 +7,21 @@ httpx>=0.27.0
 langgraph>=0.2.0,<1.0
 langchain-openai>=0.2.0,<1.0
 langchain-core>=0.3.0,<1.0
-# Pin wrapt<2 because Agent Manager auto-instruments via amp-instrumentation,
-# which transitively pulls opentelemetry-instrumentation-langchain==0.53.3.
-# That instrumentor calls wrap_function_wrapper(module=..., name=...) which
-# wrapt 2.x rejected (kwarg removed). Without this pin the LangChain
-# instrumentor crashes at startup ("Error initializing LangChain instrumentor:
-# wrap_function_wrapper() got an unexpected keyword argument 'module'") and
-# zero LangGraph spans reach the trace panel — the entire Act 2 demo moment
-# silently breaks. Remove this pin only after upgrading both the WSO2
-# amp-instrumentation chain and traceloop-sdk past their wrapt-2 fix.
+# Pinned to match amp-instrumentation's transitive resolution. tracing.py
+# calls Traceloop.init() ourselves after disabling Agent Manager's auto-
+# instrumentation (PR wso2/agent-manager#392). 0.51.1 pulls
+# opentelemetry-instrumentation-langchain==0.53.3, which is wrapt-1
+# compatible. Bump only after openllmetry #4048/#4025 ship and a tagged
+# instrumentor release handles wrapt 2.x — see TODOS.md.
+traceloop-sdk==0.51.1
+# Pin wrapt<2 because opentelemetry-instrumentation-langchain==0.53.3
+# (transitively pulled via traceloop-sdk) calls
+# wrap_function_wrapper(module=..., name=...) which wrapt 2.x rejected
+# (kwarg removed). Without this pin the LangChain instrumentor crashes at
+# startup ("Error initializing LangChain instrumentor:
+# wrap_function_wrapper() got an unexpected keyword argument 'module'")
+# and zero LangGraph spans reach the trace panel — the entire Act 2 demo
+# moment silently breaks. Remove this pin only after openllmetry #4048
+# and/or #4025 merge AND traceloop-sdk re-pins to a fixed instrumentor
+# release. See TODOS.md for the full unblock checklist.
 wrapt<2
