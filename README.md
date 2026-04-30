@@ -130,9 +130,3 @@ answer all 10 cleanly before demo day.
 Question 10 is the trace inspection question — it triggers multiple
 `check_room_availability` tool calls, making Agent Manager's trace panel
 visibly rich.
-
-## Demo references
-
-- **Design doc (locked decisions):** `~/.gstack/projects/agent-manager-analyst-demo/asankaab-unknown-design-20260428-161725.md`
-- **Test plan:** `~/.gstack/projects/agent-manager-analyst-demo/asankaab-unknown-eng-review-test-plan-20260429-000000.md`
-- **Visual reference (HTML wireframe sketch):** `~/.gstack/projects/agent-manager-analyst-demo/designs/grand-meridian-20260429/grand-meridian-sketch.html`

@@ -1,9 +1,23 @@
-"""System prompt for the Grand Meridian concierge agent.
+"""System prompt variants for the Grand Meridian concierge agent.
 
-The wording for graceful-degradation responses is locked here so it doesn't
-drift across runs. Q3 (late checkout), Q8 (pool hours), Q9 (booking handoff)
-are demo-day load-bearing.
+Three variants live here:
+  - BASELINE_PROMPT: the locked prompt. Demo-day load-bearing.
+    Hardcodes graceful-degradation phrasing for Q3 (late checkout),
+    Q8 (pool hours), Q9 (booking handoff). Do NOT edit casually —
+    the regression test in tests/test_system_prompt.py guards the
+    locked phrases.
+  - BROKEN_BETA_1: weakened prompt for the Act 5 regression beat.
+    Strips the grounding guardrails and the hardcoded-answer block.
+    Causes groundedness + helpfulness LLM-judge scores to drop.
+  - BROKEN_BETA_2: more aggressive fallback for Act 5. Used if β1
+    doesn't drop scores convincingly at Day 1 PM rehearsal.
+
+Selection happens at module load via SYSTEM_PROMPT_VARIANT env var.
+This matches agent.py's OPENAI_MODEL pattern — the redeploy is the
+toggle, not a per-request swap.
 """
+
+import os
 
 from hotel_data import (
     HOTEL_NAME,
@@ -12,7 +26,7 @@ from hotel_data import (
     RESERVATION_HANDOFF,
 )
 
-SYSTEM_PROMPT = f"""You are the AI concierge for {HOTEL_NAME}, a luxury hotel.
+BASELINE_PROMPT: str = f"""You are the AI concierge for {HOTEL_NAME}, a luxury hotel.
 
 You help guests with three things, using tools where appropriate:
 1. Room availability and pricing — call check_room_availability.
@@ -42,3 +56,44 @@ Multi-turn:
 
 Stay grounded in the tool data. If the tool data does not cover something, say so honestly.
 """
+
+
+BROKEN_BETA_1: str = f"""You are the AI concierge for {HOTEL_NAME}, a luxury hotel.
+
+You help guests with three things:
+1. Room availability and pricing.
+2. Room service menu.
+3. Local recommendations near the hotel.
+
+Voice: terse and efficient. Get to the answer fast.
+
+Quote prices in USD. Use natural language.
+"""
+
+
+BROKEN_BETA_2: str = f"""You are an AI assistant for {HOTEL_NAME}.
+
+Help guests with whatever they ask about the hotel. Be helpful and answer
+quickly. Use tools if you want, but you can also draw on general knowledge
+about luxury hotels to give the guest a complete picture of what's available.
+"""
+
+
+_VARIANTS: dict[str, str] = {
+    "baseline": BASELINE_PROMPT,
+    "broken": BROKEN_BETA_1,
+    "broken-2": BROKEN_BETA_2,
+}
+
+
+def select_prompt(variant: str | None) -> str:
+    """Resolve a variant name to its prompt string.
+
+    Unknown values fall back to the baseline silently — a typo in the env
+    var must never cause the container to fail to boot mid-demo.
+    """
+    key = (variant or "baseline").strip().lower()
+    return _VARIANTS.get(key, BASELINE_PROMPT)
+
+
+SYSTEM_PROMPT: str = select_prompt(os.environ.get("SYSTEM_PROMPT_VARIANT"))
