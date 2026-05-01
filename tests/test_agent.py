@@ -236,23 +236,65 @@ class TestResolveLlmConfig:
         assert cfg == {"api_key": None}
 
 
-class TestHealthGovernedFlag:
-    """/health surfaces governance mode so operators (and the analyst demo)
-    can verify which LLM path is live without reading the trace."""
+class TestReadyPayload:
+    """The /health response and the startup READY log share one source of
+    truth — _ready_payload(). This is the signal callers grep for in
+    platform logs to confirm the agent is listening before invoking
+    (Agent Manager doesn't expose readiness probes — see CLAUDE.md)."""
 
     def test_governed_true_when_url_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent import health
+        from agent import _ready_payload
 
         monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
-        result = health()
+        result = _ready_payload()
         assert result["governed"] is True
+        assert result["ok"] is True
+        assert "model" in result
+        assert "port" in result
 
     def test_governed_false_when_url_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        from agent import health
+        from agent import _ready_payload
 
         monkeypatch.delenv("OPENAI_URL", raising=False)
-        result = health()
+        result = _ready_payload()
         assert result["governed"] is False
+
+    def test_health_endpoint_returns_same_payload(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """/health and the startup log must agree — same shape, same fields."""
+        from agent import _ready_payload, health
+
+        monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
+        assert health() == _ready_payload()
+
+
+class TestStartupLifespanLogsReady:
+    """Lifespan startup must emit a READY <json> line. This is the only
+    in-band signal that the agent has reached the listening state, since
+    Agent Manager's Workload CRD does not expose a readinessProbe."""
+
+    def test_lifespan_emits_ready_with_governed_flag(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        import asyncio
+
+        from agent import app, lifespan
+
+        monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
+
+        async def _drive() -> None:
+            async with lifespan(app):
+                pass
+
+        with caplog.at_level("INFO", logger="concierge"):
+            asyncio.run(_drive())
+
+        ready_lines = [r for r in caplog.records if r.message.startswith("READY ")]
+        assert ready_lines, "lifespan did not emit a READY log line"
+        # The JSON payload must include the governed flag — that's the
+        # whole point of this signal during the AM-restart demo beat.
+        assert '"governed": true' in ready_lines[-1].message
 
 
 if __name__ == "__main__":

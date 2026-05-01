@@ -140,8 +140,29 @@ through governed credentials. `GET /health` reports the live mode:
 
 ```bash
 curl -s http://localhost:8000/health
-# → {"ok":true,"model":"gpt-4o","governed":false}
+# → {"ok":true,"model":"gpt-4o","governed":false,"port":8000}
 ```
+
+## Knowing when the agent is ready after a redeploy
+
+Agent Manager does not expose a Kubernetes readiness probe through its
+Workload CRD (verified — `Workload.spec.container` has no probe fields).
+After a redeploy, the gateway will route traffic to the pod the moment the
+container *starts*, not when uvicorn is actually listening on `:8000`. Hitting
+the agent during that window returns an Envoy 503 with `connection refused`.
+
+The agent emits a recognizable startup line as the in-band readiness signal.
+Watch the platform log panel (or `kubectl logs`) for it before sending
+traffic:
+
+```
+READY {"ok": true, "model": "gpt-4o", "governed": true, "port": 8000}
+```
+
+The payload is identical to `/health` — same source of truth — so the
+`governed` flag also confirms the env injection landed. If you see
+`governed: false` after configuring an LLM Service Provider, the env var
+contract is broken on the platform side.
 
 ## The 10 scripted demo questions
 

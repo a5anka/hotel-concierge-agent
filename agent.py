@@ -20,6 +20,7 @@ import os
 import threading
 import time
 from collections import defaultdict
+from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
@@ -90,7 +91,30 @@ def _get_agent():
     return _agent
 
 
-app = FastAPI(title="Grand Meridian Concierge")
+def _ready_payload() -> dict[str, Any]:
+    """Single source of truth for /health and the startup log line. The
+    `governed` flag makes the live LLM mode visible without reading the
+    trace — useful for /health and as a startup signal in platform logs."""
+    return {
+        "ok": True,
+        "model": OPENAI_MODEL,
+        "governed": bool(os.environ.get("OPENAI_URL")),
+        "port": int(os.environ.get("PORT", "8000")),
+    }
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Emit a recognizable startup line so callers can grep platform logs to
+    confirm the agent is listening before invoking. Agent Manager's Workload
+    schema does not expose readiness probes (verified against ComponentType
+    `agent-api` and the available Traits), so this log line is the only
+    in-band readiness signal during the cold-start window."""
+    log.info("READY %s", json.dumps(_ready_payload()))
+    yield
+
+
+app = FastAPI(title="Grand Meridian Concierge", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ALLOW_ORIGINS,
@@ -112,11 +136,7 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {
-        "ok": True,
-        "model": OPENAI_MODEL,
-        "governed": bool(os.environ.get("OPENAI_URL")),
-    }
+    return _ready_payload()
 
 
 def _truncate(history: list[BaseMessage]) -> list[BaseMessage]:
