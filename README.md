@@ -50,11 +50,16 @@ pytest tests/ -v
 
 Start the agent server:
 ```bash
-export OPENAI_API_KEY=sk-...
+export OPENAI_API_KEY_DEFAULT=sk-...    # local-dev key (BYO mode)
 export OPENAI_MODEL=gpt-4o
 python main.py
 # → listening on http://localhost:8000
 ```
+
+The agent reads two API key env vars and prefers the one Agent Manager
+injects when an LLM Service Provider is configured at the agent level. See
+[LLM credentials and governance modes](#llm-credentials-and-governance-modes)
+below.
 
 Smoke-test from another terminal:
 ```bash
@@ -104,12 +109,35 @@ Steps:
 
 1. In Agent Manager: Add Agent → Platform-Hosted Agent → fill the form above.
 2. Configure env vars:
-   - `OPENAI_API_KEY` (secret)
+   - `OPENAI_API_KEY_DEFAULT` (secret) — BYO key used until an LLM Service
+     Provider is configured at the agent level.
    - `OPENAI_MODEL=gpt-4o`
    - `CORS_ALLOW_ORIGINS=*` (or the specific hotel website origin)
    - `PORT` is set automatically by Agent Manager.
 3. Deploy. Endpoint will be exposed at the URL Agent Manager assigns.
 4. Update `web/index.html`'s `window.GRAND_MERIDIAN_AGENT_URL` to that URL.
+
+## LLM credentials and governance modes
+
+The agent supports two modes, switched purely by env injection:
+
+| Mode      | `OPENAI_URL` | `OPENAI_API_KEY` (AM-injected) | `OPENAI_API_KEY_DEFAULT` (BYO) | Outcome                              |
+|-----------|--------------|--------------------------------|--------------------------------|--------------------------------------|
+| BYO       | unset        | unset                          | set                            | Direct OpenAI, no governance         |
+| Governed  | set          | set                            | (ignored)                      | Routed via AM gateway with guardrails |
+
+Resolution rule, in `_resolve_llm_config()`: `OPENAI_URL` presence drives
+`base_url`; the API key is `OPENAI_API_KEY` if set, else
+`OPENAI_API_KEY_DEFAULT`. AM-injected wins.
+
+`OPENAI_API_KEY_DEFAULT` is for local development. In a production deploy,
+configure an LLM Service Provider at the org level so all traffic flows
+through governed credentials. `GET /health` reports the live mode:
+
+```bash
+curl -s http://localhost:8000/health
+# → {"ok":true,"model":"gpt-4o","governed":false}
+```
 
 ## The 10 scripted demo questions
 

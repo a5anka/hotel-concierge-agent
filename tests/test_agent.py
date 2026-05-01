@@ -146,10 +146,17 @@ class TestTruncatePreservesAiToolMessagePair:
 
 class TestAgentModuleImportsWithoutApiKey:
     """The lazy _get_agent() pattern must let the module import cleanly so CI
-    and /health smoke tests work without OPENAI_API_KEY in the env."""
+    and /health smoke tests work without any LLM credentials in the env.
+    Deterministic: clears all three env vars the resolver consults so the
+    test passes for the right reason regardless of operator shell state."""
+
+    def _clear_llm_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_URL", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY_DEFAULT", raising=False)
 
     def test_imports_with_api_key_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        self._clear_llm_env(monkeypatch)
         # Force a fresh import so we exercise the import path, not a cached module.
         sys.modules.pop("agent", None)
         try:
@@ -163,7 +170,7 @@ class TestAgentModuleImportsWithoutApiKey:
         assert agent_module._agent is None
 
     def test_health_works_without_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        self._clear_llm_env(monkeypatch)
         sys.modules.pop("agent", None)
         try:
             agent_module = importlib.import_module("agent")
@@ -172,6 +179,79 @@ class TestAgentModuleImportsWithoutApiKey:
             sys.modules.pop("agent", None)
         assert result["ok"] is True
         assert "model" in result
+        assert result["governed"] is False
+
+
+class TestResolveLlmConfig:
+    """Two-env priority: AM-injected OPENAI_URL + OPENAI_API_KEY win over the
+    local-dev OPENAI_API_KEY_DEFAULT slot. URL presence drives base_url. The
+    misconfig case (URL set, AM key blank) falls back to the default key —
+    the gateway will reject an unknown key, but no governance bypass."""
+
+    def _clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+        monkeypatch.delenv("OPENAI_URL", raising=False)
+        monkeypatch.delenv("OPENAI_API_KEY_DEFAULT", raising=False)
+
+    def test_governed_mode_am_key_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent import _resolve_llm_config
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
+        monkeypatch.setenv("OPENAI_API_KEY", "am-key")
+        monkeypatch.setenv("OPENAI_API_KEY_DEFAULT", "byo-key")
+        base_url, api_key = _resolve_llm_config()
+        assert base_url == "https://gw.example/v1"
+        assert api_key == "am-key"
+
+    def test_byo_mode_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent import _resolve_llm_config
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY_DEFAULT", "byo-key")
+        base_url, api_key = _resolve_llm_config()
+        assert base_url is None
+        assert api_key == "byo-key"
+
+    def test_misconfig_url_set_am_key_blank(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The case most likely to occur in practice: AM injects URL but the
+        provider key isn't propagated. Resolver falls through to the default
+        key + AM URL. Gateway will 401 the unknown key — failure is loud."""
+        from agent import _resolve_llm_config
+
+        self._clear(monkeypatch)
+        monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
+        monkeypatch.setenv("OPENAI_API_KEY_DEFAULT", "byo-key")
+        base_url, api_key = _resolve_llm_config()
+        assert base_url == "https://gw.example/v1"
+        assert api_key == "byo-key"
+
+    def test_nothing_set_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent import _resolve_llm_config
+
+        self._clear(monkeypatch)
+        base_url, api_key = _resolve_llm_config()
+        assert base_url is None
+        assert api_key is None
+
+
+class TestHealthGovernedFlag:
+    """/health surfaces governance mode so operators (and the analyst demo)
+    can verify which LLM path is live without reading the trace."""
+
+    def test_governed_true_when_url_set(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent import health
+
+        monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
+        result = health()
+        assert result["governed"] is True
+
+    def test_governed_false_when_url_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from agent import health
+
+        monkeypatch.delenv("OPENAI_URL", raising=False)
+        result = health()
+        assert result["governed"] is False
 
 
 if __name__ == "__main__":

@@ -60,13 +60,25 @@ CORS_ALLOW_ORIGINS = [
 _agent = None
 
 
+def _resolve_llm_config() -> tuple[str | None, str | None]:
+    """Two-env priority: Agent Manager-injected vars win over the local-dev
+    default. When AM configures an LLM Service Provider, it restarts the
+    deployment with OPENAI_URL + OPENAI_API_KEY. Outside that flow, the agent
+    falls back to OPENAI_API_KEY_DEFAULT (local development only — not a
+    production fallback)."""
+    base_url = os.getenv("OPENAI_URL") or None
+    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_DEFAULT")
+    return base_url, api_key
+
+
 def _get_agent():
-    """Lazy so the module imports cleanly when OPENAI_API_KEY isn't set
-    (CI, linters, local smoke tests of /health). ChatOpenAI reads the env
-    var on first instantiation, not at import time."""
+    """Lazy so the module imports cleanly with no keys set (CI, linters,
+    /health smoke tests). ChatOpenAI reads credentials on first instantiation,
+    not at import time."""
     global _agent
     if _agent is None:
-        llm = ChatOpenAI(model=OPENAI_MODEL)
+        base_url, api_key = _resolve_llm_config()
+        llm = ChatOpenAI(model=OPENAI_MODEL, base_url=base_url, api_key=api_key)
         _agent = create_react_agent(llm, tools=LANGCHAIN_TOOLS, prompt=SYSTEM_PROMPT)
     return _agent
 
@@ -93,7 +105,11 @@ class ChatResponse(BaseModel):
 
 @app.get("/health")
 def health() -> dict[str, Any]:
-    return {"ok": True, "model": OPENAI_MODEL}
+    return {
+        "ok": True,
+        "model": OPENAI_MODEL,
+        "governed": bool(os.environ.get("OPENAI_URL")),
+    }
 
 
 def _truncate(history: list[BaseMessage]) -> list[BaseMessage]:
