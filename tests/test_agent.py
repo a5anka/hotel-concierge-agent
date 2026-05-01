@@ -183,56 +183,57 @@ class TestAgentModuleImportsWithoutApiKey:
 
 
 class TestResolveLlmConfig:
-    """Two-env priority: AM-injected OPENAI_URL + OPENAI_API_KEY win over the
-    local-dev OPENAI_API_KEY_DEFAULT slot. URL presence drives base_url. The
-    misconfig case (URL set, AM key blank) falls back to the default key —
-    the gateway will reject an unknown key, but no governance bypass."""
+    """OPENAI_URL presence is the strict mode gate. Governed mode sends the
+    AM-minted key on a custom `API-Key` header and blanks `Authorization` to
+    suppress the SDK's default Bearer; BYO mode uses OPENAI_API_KEY_DEFAULT
+    against OpenAI directly. The two slots have distinct purposes — no
+    cross-mode fallback."""
 
     def _clear(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("OPENAI_API_KEY", raising=False)
         monkeypatch.delenv("OPENAI_URL", raising=False)
         monkeypatch.delenv("OPENAI_API_KEY_DEFAULT", raising=False)
 
-    def test_governed_mode_am_key_wins(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_governed_mode_uses_api_key_header(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from agent import _resolve_llm_config
 
         self._clear(monkeypatch)
         monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
         monkeypatch.setenv("OPENAI_API_KEY", "am-key")
         monkeypatch.setenv("OPENAI_API_KEY_DEFAULT", "byo-key")
-        base_url, api_key = _resolve_llm_config()
-        assert base_url == "https://gw.example/v1"
-        assert api_key == "am-key"
+        cfg = _resolve_llm_config()
+        assert cfg["base_url"] == "https://gw.example/v1"
+        assert cfg["api_key"] == ""
+        assert cfg["default_headers"] == {"API-Key": "am-key", "Authorization": ""}
 
-    def test_byo_mode_falls_back_to_default(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_byo_mode_uses_default_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from agent import _resolve_llm_config
 
         self._clear(monkeypatch)
         monkeypatch.setenv("OPENAI_API_KEY_DEFAULT", "byo-key")
-        base_url, api_key = _resolve_llm_config()
-        assert base_url is None
-        assert api_key == "byo-key"
+        cfg = _resolve_llm_config()
+        assert cfg == {"api_key": "byo-key"}
+        assert "default_headers" not in cfg
+        assert "base_url" not in cfg
 
     def test_misconfig_url_set_am_key_blank(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The case most likely to occur in practice: AM injects URL but the
-        provider key isn't propagated. Resolver falls through to the default
-        key + AM URL. Gateway will 401 the unknown key — failure is loud."""
+        """URL set but AM key missing: send empty API-Key header. Gateway
+        will 401 — failure is loud, no silent fallback to the BYO key."""
         from agent import _resolve_llm_config
 
         self._clear(monkeypatch)
         monkeypatch.setenv("OPENAI_URL", "https://gw.example/v1")
         monkeypatch.setenv("OPENAI_API_KEY_DEFAULT", "byo-key")
-        base_url, api_key = _resolve_llm_config()
-        assert base_url == "https://gw.example/v1"
-        assert api_key == "byo-key"
+        cfg = _resolve_llm_config()
+        assert cfg["base_url"] == "https://gw.example/v1"
+        assert cfg["default_headers"]["API-Key"] == ""
 
-    def test_nothing_set_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_nothing_set_returns_byo_with_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from agent import _resolve_llm_config
 
         self._clear(monkeypatch)
-        base_url, api_key = _resolve_llm_config()
-        assert base_url is None
-        assert api_key is None
+        cfg = _resolve_llm_config()
+        assert cfg == {"api_key": None}
 
 
 class TestHealthGovernedFlag:

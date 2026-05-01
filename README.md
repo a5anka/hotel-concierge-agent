@@ -119,16 +119,20 @@ Steps:
 
 ## LLM credentials and governance modes
 
-The agent supports two modes, switched purely by env injection:
+The agent supports two modes, switched purely by env injection. `OPENAI_URL`
+presence is the strict mode gate — the two key slots have distinct purposes
+and don't cross-fallback:
 
 | Mode      | `OPENAI_URL` | `OPENAI_API_KEY` (AM-injected) | `OPENAI_API_KEY_DEFAULT` (BYO) | Outcome                              |
 |-----------|--------------|--------------------------------|--------------------------------|--------------------------------------|
-| BYO       | unset        | unset                          | set                            | Direct OpenAI, no governance         |
+| BYO       | unset        | (ignored)                      | set                            | Direct OpenAI, no governance         |
 | Governed  | set          | set                            | (ignored)                      | Routed via AM gateway with guardrails |
 
-Resolution rule, in `_resolve_llm_config()`: `OPENAI_URL` presence drives
-`base_url`; the API key is `OPENAI_API_KEY` if set, else
-`OPENAI_API_KEY_DEFAULT`. AM-injected wins.
+In governed mode the AM gateway expects the key on a custom `API-Key` header
+(not `Authorization: Bearer`), per Agent Manager's documented sample. The
+resolver passes `api_key=""` to suppress the OpenAI SDK's default Authorization
+header and sets the custom header explicitly via `default_headers`. See
+`_resolve_llm_config()` in `agent.py`.
 
 `OPENAI_API_KEY_DEFAULT` is for local development. In a production deploy,
 configure an LLM Service Provider at the org level so all traffic flows

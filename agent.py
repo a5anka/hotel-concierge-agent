@@ -60,15 +60,23 @@ CORS_ALLOW_ORIGINS = [
 _agent = None
 
 
-def _resolve_llm_config() -> tuple[str | None, str | None]:
-    """Two-env priority: Agent Manager-injected vars win over the local-dev
-    default. When AM configures an LLM Service Provider, it restarts the
-    deployment with OPENAI_URL + OPENAI_API_KEY. Outside that flow, the agent
-    falls back to OPENAI_API_KEY_DEFAULT (local development only — not a
-    production fallback)."""
-    base_url = os.getenv("OPENAI_URL") or None
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY_DEFAULT")
-    return base_url, api_key
+def _resolve_llm_config() -> dict[str, Any]:
+    """OPENAI_URL presence is the mode gate. In governed mode, the AM gateway
+    expects the API key on a custom `API-Key` header (not `Authorization: Bearer`),
+    so we suppress the SDK's default Authorization header and set API-Key
+    explicitly — this matches Agent Manager's documented sample. In BYO mode,
+    we use OPENAI_API_KEY_DEFAULT against OpenAI directly."""
+    base_url = os.getenv("OPENAI_URL")
+    if base_url:
+        return {
+            "base_url": base_url,
+            "api_key": "",
+            "default_headers": {
+                "API-Key": os.getenv("OPENAI_API_KEY", ""),
+                "Authorization": "",
+            },
+        }
+    return {"api_key": os.getenv("OPENAI_API_KEY_DEFAULT")}
 
 
 def _get_agent():
@@ -77,8 +85,7 @@ def _get_agent():
     not at import time."""
     global _agent
     if _agent is None:
-        base_url, api_key = _resolve_llm_config()
-        llm = ChatOpenAI(model=OPENAI_MODEL, base_url=base_url, api_key=api_key)
+        llm = ChatOpenAI(model=OPENAI_MODEL, **_resolve_llm_config())
         _agent = create_react_agent(llm, tools=LANGCHAIN_TOOLS, prompt=SYSTEM_PROMPT)
     return _agent
 
