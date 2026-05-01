@@ -52,12 +52,6 @@ FRIENDLY_FALLBACK = (
 SESSIONS: dict[str, list[BaseMessage]] = {}
 SESSION_LOCKS: dict[str, threading.Lock] = defaultdict(threading.Lock)
 
-# CORS_ALLOW_ORIGINS: comma-separated list of allowed origins for the public widget.
-CORS_ALLOW_ORIGINS = [
-    o.strip() for o in os.environ.get("CORS_ALLOW_ORIGINS", "*").split(",") if o.strip()
-]
-
-
 _agent = None
 
 
@@ -115,9 +109,13 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Grand Meridian Concierge", lifespan=lifespan)
+# CORS is for local dev only (widget on :5500 → agent on :8000). In Agent
+# Manager deploys, the Envoy gateway in front handles CORS — this middleware
+# is redundant on that path but harmless. Permissive defaults match the
+# gateway's posture and the demo's no-auth scope.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ALLOW_ORIGINS,
+    allow_origins=["*"],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
     allow_credentials=False,

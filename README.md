@@ -112,8 +112,11 @@ Steps:
    - `OPENAI_API_KEY_DEFAULT` (secret) — BYO key used until an LLM Service
      Provider is configured at the agent level.
    - `OPENAI_MODEL=gpt-4o`
-   - `CORS_ALLOW_ORIGINS=*` (or the specific hotel website origin)
    - `PORT` is set automatically by Agent Manager.
+
+   The Envoy gateway in front of the agent handles CORS, so no
+   `CORS_ALLOW_ORIGINS` env var is needed. If you've previously set one,
+   remove it from the Workload to keep the deploy config clean.
 3. Deploy. Endpoint will be exposed at the URL Agent Manager assigns.
 4. Update `web/index.html`'s `window.GRAND_MERIDIAN_AGENT_URL` to that URL.
 
