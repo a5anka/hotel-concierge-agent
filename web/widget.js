@@ -1,13 +1,42 @@
 // The Grand Meridian — concierge chat widget.
 //
-// Vanilla JS, no dependencies beyond Tailwind via CDN (already loaded in index.html).
+// Vanilla JS, no build step. Two CDN deps loaded by index.html before this file:
+// `marked` (markdown parser) and `DOMPurify` (sanitizer) — both required for
+// rendering bot replies as markdown. User messages stay escaped (no markdown).
 // Stateless server: this widget keeps the full message thread in memory and sends
 // it on every POST. Five UI states: empty (greeting + chips), loading, success,
 // error, tool-running. Anchored bottom-right at 32px margin.
 (() => {
   "use strict";
 
-  const ENDPOINT = window.GRAND_MERIDIAN_AGENT_URL || "http://localhost:8000/chat";
+  // Endpoint resolution precedence:
+  //   1. ?agent=<url>      — overrides and persists to localStorage. ?agent=reset clears.
+  //   2. localStorage      — sticky across reloads once set via the query param.
+  //   3. window.GRAND_MERIDIAN_AGENT_URL (set in index.html, the committed default).
+  //   4. http://localhost:8000/chat.
+  // Demo flow: paste `?agent=<deployed-url>` once, reload — sticks until ?agent=reset.
+  const ENDPOINT = (() => {
+    const LS_KEY = "gmAgentUrl";
+    const fallback = window.GRAND_MERIDIAN_AGENT_URL || "http://localhost:8000/chat";
+    let fromQuery = null;
+    try {
+      fromQuery = new URLSearchParams(window.location.search).get("agent");
+    } catch (_) {}
+    if (fromQuery === "reset") {
+      try { localStorage.removeItem(LS_KEY); } catch (_) {}
+      return fallback;
+    }
+    if (fromQuery) {
+      try { new URL(fromQuery); } catch (_) { return fallback; }
+      try { localStorage.setItem(LS_KEY, fromQuery); } catch (_) {}
+      return fromQuery;
+    }
+    try {
+      const stored = localStorage.getItem(LS_KEY);
+      if (stored) { new URL(stored); return stored; }
+    } catch (_) {}
+    return fallback;
+  })();
   const PANEL_W = 380;
   const PANEL_H = 560;
 
@@ -133,6 +162,24 @@
       .replace(/>/g, "&gt;");
   }
 
+  // Configure marked once. `breaks: true` — single newlines render as <br>,
+  // matching how the LLM tends to format chat replies. `gfm: true` for
+  // task lists, autolinks, fenced code.
+  if (typeof marked !== "undefined" && typeof marked.setOptions === "function") {
+    marked.setOptions({ breaks: true, gfm: true });
+  }
+
+  // Render LLM markdown safely. If either CDN dep failed to load, fall back
+  // to escaped plaintext rather than risking unsanitized innerHTML.
+  function renderMarkdown(text) {
+    if (typeof marked === "undefined" || typeof DOMPurify === "undefined") {
+      return escapeHtml(text).replace(/\n/g, "<br>");
+    }
+    return DOMPurify.sanitize(marked.parse(String(text)), {
+      ADD_ATTR: ["target", "rel"],
+    });
+  }
+
   function renderBot(text, opts = {}) {
     const isGreeting = !!opts.greeting;
     const bubble = el(
@@ -142,8 +189,13 @@
        border-radius:2px 14px 14px 14px;`,
       isGreeting
         ? `<div style="font-family:'Playfair Display',serif;font-size:15px;font-weight:600;color:#1B2B4B;margin-bottom:4px;">Welcome to The Grand Meridian.</div>${escapeHtml(text.replace("Welcome to The Grand Meridian. ", ""))}`
-        : escapeHtml(text)
+        : `<div class="cm-md">${renderMarkdown(text)}</div>`
     );
+    // Make rendered links open in a new tab without leaking the opener.
+    bubble.querySelectorAll("a[href]").forEach((a) => {
+      a.setAttribute("target", "_blank");
+      a.setAttribute("rel", "noopener noreferrer");
+    });
     thread.appendChild(bubble);
     scrollToBottom();
     return bubble;
@@ -284,7 +336,7 @@
     }
   }
 
-  // Typing-dot animation styles
+  // Typing-dot animation + markdown styles, scoped so they only apply inside the bubble.
   const styleTag = document.createElement("style");
   styleTag.textContent = `
     .cm-dot {
@@ -297,6 +349,67 @@
       0%, 80%, 100% { opacity: 0.25; transform: translateY(0); }
       40% { opacity: 1; transform: translateY(-2px); }
     }
+
+    /* Markdown rendering inside bot bubbles */
+    .cm-md > *:first-child { margin-top: 0; }
+    .cm-md > *:last-child  { margin-bottom: 0; }
+    .cm-md p { margin: 0 0 8px; }
+    .cm-md ul, .cm-md ol { margin: 4px 0 8px; padding-left: 20px; }
+    .cm-md li { margin: 2px 0; }
+    .cm-md li > p { margin: 0; }
+    .cm-md h1, .cm-md h2, .cm-md h3, .cm-md h4, .cm-md h5, .cm-md h6 {
+      font-family: 'Playfair Display', serif;
+      color: #1B2B4B;
+      margin: 8px 0 4px;
+      line-height: 1.3;
+    }
+    .cm-md h1 { font-size: 17px; }
+    .cm-md h2 { font-size: 16px; }
+    .cm-md h3, .cm-md h4, .cm-md h5, .cm-md h6 { font-size: 15px; }
+    .cm-md a { color: #1B2B4B; text-decoration: underline; text-decoration-color: #C9A84C; }
+    .cm-md a:hover { text-decoration-color: #1B2B4B; }
+    .cm-md strong { font-weight: 600; color: #1B2B4B; }
+    .cm-md em { font-style: italic; }
+    .cm-md code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 12.5px;
+      background: #F5F2E8;
+      padding: 1px 5px;
+      border-radius: 3px;
+    }
+    .cm-md pre {
+      background: #FBFAF6;
+      border: 1px solid #E6E2D6;
+      padding: 8px 10px;
+      margin: 6px 0;
+      border-radius: 4px;
+      overflow-x: auto;
+      font-size: 12.5px;
+      line-height: 1.45;
+    }
+    .cm-md pre code { background: transparent; padding: 0; }
+    .cm-md blockquote {
+      margin: 6px 0;
+      padding: 2px 0 2px 10px;
+      border-left: 2px solid #C9A84C;
+      color: #4a4a4a;
+    }
+    .cm-md hr {
+      border: none;
+      border-top: 1px solid #E6E2D6;
+      margin: 10px 0;
+    }
+    .cm-md table {
+      border-collapse: collapse;
+      margin: 6px 0;
+      font-size: 13px;
+    }
+    .cm-md th, .cm-md td {
+      border: 1px solid #E6E2D6;
+      padding: 4px 8px;
+      text-align: left;
+    }
+    .cm-md th { background: #FBFAF6; font-weight: 600; color: #1B2B4B; }
   `;
   document.head.appendChild(styleTag);
 })();
