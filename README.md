@@ -112,7 +112,10 @@ Steps:
    - `OPENAI_API_KEY_DEFAULT` (secret) — BYO key used until an LLM Service
      Provider is configured at the agent level.
    - `OPENAI_MODEL=gpt-4o`
-   - `PORT` is set automatically by Agent Manager.
+   - The agent listens on `8000` by default (`PORT` env var override
+     supported but unused in the AM deploy). The `Agent Interface: Chat
+     Agent (POST /chat, port 8000)` form field is what tells AM where to
+     route, not an env-var injection.
 
    The Envoy gateway in front of the agent handles CORS, so no
    `CORS_ALLOW_ORIGINS` env var is needed. If you've previously set one,
