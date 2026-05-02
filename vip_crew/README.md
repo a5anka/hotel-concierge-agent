@@ -36,7 +36,7 @@ cp ../.env.local.example ../.env.local
 ```bash
 cd vip_crew
 set -a; source ../.env.local; set +a
-uv run amp-instrument uv run python crew.py VIP-042
+uv run amp-instrument python crew.py VIP-042
 ```
 
 The demo line:
@@ -46,10 +46,10 @@ The demo line:
 
 ```bash
 # Trigger 1: standard personalization
-uv run amp-instrument uv run python crew.py VIP-042
+uv run amp-instrument python crew.py VIP-042
 
 # Trigger 2: governance trigger — Act 3 prompt decorator should fire
-uv run amp-instrument uv run python crew.py VIP-203 --include-pricing
+uv run amp-instrument python crew.py VIP-203 --include-pricing
 ```
 
 After each run, switch to AM trace panel. CrewAI-specific spans appear within ~5s:
@@ -69,7 +69,7 @@ After each run, switch to AM trace panel. CrewAI-specific spans appear within ~5
 - [ ] `localhost:22893/otel` reachable: `curl -sI http://localhost:22893/otel` returns any HTTP response
 - [ ] `.env.local` filled with real AM gateway URL + JWT
 - [ ] `uv run python crew.py VIP-042` (Tier 1) produces a coherent welcome note in <60s
-- [ ] `uv run amp-instrument uv run python crew.py VIP-042` produces traces in AM panel within ~5s
+- [ ] `uv run amp-instrument python crew.py VIP-042` produces traces in AM panel within ~5s
 - [ ] `--include-pricing` run shows Act 3 prompt decorator output in welcome note
 - [ ] 5 consecutive runs without amp-instrument crashing
 

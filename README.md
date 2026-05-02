@@ -212,10 +212,10 @@ cd vip_crew
 set -a; source ../.env.local; set +a
 
 # Trigger 1: trace demo. Watch agents stream live in the terminal.
-uv run amp-instrument uv run python crew.py VIP-042
+uv run amp-instrument python crew.py VIP-042
 
 # Trigger 2: governance trigger — Act 3 prompt decorator fires on pricing mention
-uv run amp-instrument uv run python crew.py VIP-203 --include-pricing
+uv run amp-instrument python crew.py VIP-203 --include-pricing
 ```
 
 VIPs available: `VIP-042` (Dr. Mei Tanaka), `VIP-101` (Marcus Chen), `VIP-203` (Sofia Reyes).
