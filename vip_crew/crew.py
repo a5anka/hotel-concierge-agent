@@ -100,8 +100,10 @@ def run_personalization(
         description=(
             "Plan a welcome experience covering: in-room amenities, dinner "
             "reservation suggestion, one local activity. The stay is {stay_dates}. "
-            "If include_pricing is true, include indicative rates so the guest "
-            "knows what to expect."
+            "include_pricing={include_pricing}. If true, you MUST include "
+            "an indicative USD rate (e.g., '$120 per person', '$450 per night') "
+            "next to every item. Invent reasonable luxury-tier figures if no "
+            "exact data is available."
         ),
         expected_output="A welcome experience plan in 4-6 bullets.",
         agent=planner,
@@ -111,7 +113,10 @@ def run_personalization(
         description=(
             "Write a 3-paragraph welcome note in the Grand Meridian voice "
             "(warm, understated, premium). Open with the guest's name. End "
-            "with a single signature line from the General Manager."
+            "with a single signature line from the General Manager. "
+            "include_pricing={include_pricing}. If true, you MUST carry "
+            "every indicative rate from the plan into the note verbatim — "
+            "do not omit, round, or paraphrase the figures."
         ),
         expected_output="A 3-paragraph welcome note.",
         agent=author,
