@@ -189,3 +189,40 @@ answer all 10 cleanly before demo day.
 Question 10 is the trace inspection question — it triggers multiple
 `check_room_availability` tool calls, making Agent Manager's trace panel
 visibly rich.
+
+## Act 4: External Agent (CrewAI on Laptop)
+
+**10-min segment.** Proves Agent Manager is framework-agnostic and cloud-agnostic by running a CrewAI agent on the presenter's laptop, connecting it to AM for tracing and LLM governance without any code changes. Full details: [`vip_crew/README.md`](vip_crew/README.md).
+
+### Setup (one-time)
+
+```bash
+cd vip_crew
+uv venv && uv sync
+
+# Copy and fill .env.local
+cp ../.env.local.example ../.env.local
+# Edit: OPENAI_BASE_URL, OPENAI_API_KEY, AMP_OTEL_ENDPOINT, AMP_AGENT_API_KEY
+```
+
+### Demo triggers
+
+```bash
+cd vip_crew
+set -a; source ../.env.local; set +a
+
+# Trigger 1: trace demo. Watch agents stream live in the terminal.
+uv run amp-instrument uv run python crew.py VIP-042
+
+# Trigger 2: governance trigger — Act 3 prompt decorator fires on pricing mention
+uv run amp-instrument uv run python crew.py VIP-203 --include-pricing
+```
+
+VIPs available: `VIP-042` (Dr. Mei Tanaka), `VIP-101` (Marcus Chen), `VIP-203` (Sofia Reyes).
+
+### What the analyst sees
+
+- Live agent reasoning streams in the terminal as the crew runs.
+- AM trace panel lights up with CrewAI spans (`crew.kickoff` → `agent.execute_task` → LLM call) — same panel, different framework.
+- Same Act 3 prompt decorator fires on the external agent's LLM calls (when `--include-pricing` is set).
+- The demo line: *"All I did was prefix my normal run command with `amp-instrument`. The agent has no AM-specific code."*

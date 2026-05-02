@@ -158,3 +158,42 @@ RECOMMENDATIONS = {
 POOL_HOURS = "7am-10pm daily"
 LATE_CHECKOUT_POLICY = "Subject to availability, please confirm at check-in."
 RESERVATION_HANDOFF = "I'll connect you with our concierge team to arrange this."
+
+VIP_GUESTS = {
+    "VIP-042": {
+        "name": "Dr. Mei Tanaka",
+        "tier": "Diamond",
+        "previous_stays": 7,
+        "preferences": {
+            "room_floor": "high",
+            "dietary": "vegetarian, no shellfish",
+            "amenity_priority": ["quiet room", "yoga mat in room"],
+            "dining_history": ["sushi counter twice", "rooftop bar once"],
+        },
+        "notes": "Speaks at design conferences; in town for IxDA Tokyo.",
+    },
+    "VIP-101": {
+        "name": "Marcus Chen",
+        "tier": "Platinum",
+        "previous_stays": 14,
+        "preferences": {
+            "room_floor": "any",
+            "dietary": "gluten-free",
+            "amenity_priority": ["fast Wi-Fi", "espresso machine", "blackout curtains"],
+            "dining_history": ["in-room breakfast every visit", "ribeye twice"],
+        },
+        "notes": "Series-B founder; usually in town for board meetings, rarely leaves the hotel before noon.",
+    },
+    "VIP-203": {
+        "name": "Sofia Reyes",
+        "tier": "Diamond",
+        "previous_stays": 4,
+        "preferences": {
+            "room_floor": "ground or low",
+            "dietary": "pescatarian",
+            "amenity_priority": ["dog amenities", "patio access", "fresh flowers"],
+            "dining_history": ["sea bass three times", "rooftop bar twice"],
+        },
+        "notes": "Filmmaker; travels with a small terrier named Goose. Prefers ground-floor for easy outdoor access.",
+    },
+}

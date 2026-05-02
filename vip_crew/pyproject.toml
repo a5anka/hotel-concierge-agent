@@ -1,0 +1,21 @@
+[project]
+name = "vip-crew"
+version = "0.1.0"
+description = "VIP Personalization CrewAI agent for external agent demo"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "crewai>=1.14.4",
+    "crewai-tools>=1.14.4",
+    "amp-instrumentation>=0.1.6",
+]
+
+[tool.uv]
+# Align OTEL packages to crewai's expectations (via traceloop-sdk)
+override-dependencies = [
+    "opentelemetry-api>=1.39.0",
+    "opentelemetry-sdk>=1.39.0",
+    "opentelemetry-exporter-otlp-proto-common>=1.39.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.39.0",
+    "opentelemetry-exporter-otlp-proto-http>=1.39.0",
+]
