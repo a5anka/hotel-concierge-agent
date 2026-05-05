@@ -203,7 +203,10 @@ class TestResolveLlmConfig:
         monkeypatch.setenv("OPENAI_API_KEY_DEFAULT", "byo-key")
         cfg = _resolve_llm_config()
         assert cfg["base_url"] == "https://gw.example/v1"
-        assert cfg["api_key"] == ""
+        # Non-empty sentinel — openai>=1.50 rejects empty string. The
+        # Authorization header is blanked in default_headers so the sentinel
+        # never reaches the wire.
+        assert cfg["api_key"] == "unused"
         assert cfg["default_headers"] == {"API-Key": "am-key", "Authorization": ""}
 
     def test_byo_mode_uses_default_key(self, monkeypatch: pytest.MonkeyPatch) -> None:

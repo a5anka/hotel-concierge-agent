@@ -63,9 +63,13 @@ def _resolve_llm_config() -> dict[str, Any]:
     we use OPENAI_API_KEY_DEFAULT against OpenAI directly."""
     base_url = os.getenv("OPENAI_URL")
     if base_url:
+        # openai>=1.50 rejects an empty api_key as "missing credentials" before
+        # default_headers can override Authorization. Pass a non-empty sentinel
+        # so the constructor accepts it; default_headers blanks Authorization
+        # so the sentinel never reaches the wire — only API-Key does.
         return {
             "base_url": base_url,
-            "api_key": "",
+            "api_key": "unused",
             "default_headers": {
                 "API-Key": os.getenv("OPENAI_API_KEY", ""),
                 "Authorization": "",
