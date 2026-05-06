@@ -65,6 +65,27 @@ CrewAI-specific spans within a few seconds:
 crew.kickoff → task.execute → agent.execute_task → LLM call
 ```
 
+## How the crew works
+
+Four agents run sequentially, each handing its output to the next:
+
+1. **Profile Researcher** — looks up the guest via the `lookup_guest_history`
+   tool: name, tier, stay history, preferences, notes. *(The only agent with
+   a tool — every other step is pure reasoning.)*
+2. **Preference Analyst** — narrows the raw profile to the 3 preferences
+   most likely to delight this guest, with a one-line rationale for each.
+3. **Itinerary Planner** — designs the welcome experience: in-room
+   amenities, a dinner reservation suggestion, one local activity. With
+   `--include-pricing`, attaches indicative USD rates to every item.
+4. **Welcome Note Author** — writes a 3-paragraph note in the Grand
+   Meridian voice, signed by the General Manager. Carries any pricing
+   forward verbatim — which is what makes `--include-pricing` trip the
+   disclosure decorator on the LLM gateway.
+
+In AM's trace panel each agent appears as a separate `agent.execute_task`
+span under one `crew.kickoff` parent, so the handoff sequence is visible
+and each LLM call can be inspected independently.
+
 ## Architecture
 
 - `crew.py` — 4-agent sequential crew plus CLI entrypoint.
