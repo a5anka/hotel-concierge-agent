@@ -152,6 +152,26 @@ curl -s http://localhost:8000/health
 # → {"ok":true,"model":"gpt-4o","governed":false,"port":8000}
 ```
 
+### Example: a compliance prompt decorator
+
+Beyond credential routing, AM's LLM Service Provider can attach a **prompt
+decorator** that augments every outbound LLM call without any change to agent
+code. The concierge's governed deploy uses one such decorator to enforce a
+pricing-disclosure policy:
+
+> If your response mentions pricing, rates, or availability ANYWHERE, append
+> exactly one line — and only one — at the very end of the entire response,
+> AFTER any signature line: *"See our [terms and conditions](https://grandmeridian.example/terms)
+> for confirmation of rates and availability."* Do not insert this line at the
+> end of paragraphs, lists, or sections — only at the absolute end of the
+> response. If this line already appears in the response, do NOT add another.
+
+The decorator is configured in the AM admin UI (on the LLM Service Provider,
+or as an agent-level override) and applies uniformly to every LLM call routed
+through the gateway — including calls from the external CrewAI agent below.
+The agent code has no awareness of it, which is the point: governance lives
+at the platform, not in app code.
+
 ## Readiness signal
 
 After a redeploy, the agent emits a recognizable startup line so callers can
@@ -205,7 +225,7 @@ set -a; source ../.env.local; set +a
 # Run it through the AM instrumentation wrapper:
 uv run amp-instrument python crew.py VIP-042
 
-# With pricing flag (exercises governance / prompt-decoration on outbound LLM calls):
+# With pricing flag — response triggers the disclosure decorator from the governance section above:
 uv run amp-instrument python crew.py VIP-203 --include-pricing
 ```
 
