@@ -1,27 +1,36 @@
-# Agent Manager Analyst Demo — The Grand Meridian Concierge
+# Hotel Concierge — A WSO2 Agent Manager Sample
 
-WSO2 Agent Manager analyst-briefing demo. A hotel concierge agent deployed via
-Agent Manager, observed via the platform's testing UI, and consumed from a
-hotel landing page through a vanilla JS chat widget.
+A complete sample agent for WSO2 Agent Manager. A hotel concierge built on
+LangGraph + OpenAI, deployed via Agent Manager, observed through the platform's
+trace panel, and consumed from a static landing page via a vanilla JS chat
+widget.
 
-## What's here
+Use this repo as a reference for:
+
+- The **Platform-Hosted Agent** chat contract (`POST /chat`).
+- **BYO vs governed** LLM credential modes (env-injection-driven, no code changes).
+- **In-band readiness signaling** via a `READY` log line.
+- A **framework-agnostic** integration: the same AM tracing + LLM governance
+  applied to a CrewAI agent running outside AM (see [`vip_crew/`](vip_crew/)).
+
+## Repo layout
 
 ```
 .
 ├── main.py             Entry point. Agent Manager start command: `python main.py`.
-├── agent.py            FastAPI app + tool-calling loop. POST /chat keyed by session_id.
-├── tools.py            3 hotel tools + dispatch table.
+├── agent.py            FastAPI app + LangGraph tool-calling loop. POST /chat keyed by session_id.
+├── tools.py            3 hotel tools (room availability, room-service menu, local recs).
 ├── hotel_data.py       Single source of truth for rooms, menu, recommendations.
-├── system_prompt.py    Concierge persona + locked graceful-degradation phrasing.
-├── requirements.txt    openai, fastapi, uvicorn, pytest.
-├── tests/test_tools.py 16 unit tests, ~1 second to run.
+├── system_prompt.py    Concierge persona prompt.
+├── requirements.txt    openai, fastapi, uvicorn, langgraph, pytest.
+├── tests/              Unit tests (~1s).
 ├── web/
 │   ├── index.html      "The Grand Meridian" landing page (Tailwind via CDN).
 │   └── widget.js       Vanilla JS chat widget, ~250 lines, no build step.
-└── TODOS.md            Pre-flight tasks (hello-world deploy validation).
+└── vip_crew/           External CrewAI sample — see vip_crew/README.md.
 ```
 
-## Chat interface (Agent Manager standard)
+## Chat interface (Platform-Hosted Agent contract)
 
 ```
 POST /chat   (port 8000)
@@ -29,9 +38,9 @@ Request:  {"message": "string", "session_id": "string", "context": {}}
 Response: {"response": "string"}
 ```
 
-Conversation state is kept server-side, keyed by `session_id`. Send one user
-message per turn; the server stitches the thread together. `context` is
-accepted per the contract and logged into the trace, but not currently
+Conversation state is kept server-side, keyed by `session_id`. The client sends
+one user message per turn; the server stitches the thread together. `context`
+is accepted per the contract and logged into the trace, but is not currently
 injected into the prompt.
 
 ## Run locally
@@ -48,18 +57,13 @@ Run unit tests:
 pytest tests/ -v
 ```
 
-Start the agent server:
+Start the agent:
 ```bash
 export OPENAI_API_KEY_DEFAULT=sk-...    # local-dev key (BYO mode)
 export OPENAI_MODEL=gpt-4o
 python main.py
 # → listening on http://localhost:8000
 ```
-
-The agent reads two API key env vars and prefers the one Agent Manager
-injects when an LLM Service Provider is configured at the agent level. See
-[LLM credentials and governance modes](#llm-credentials-and-governance-modes)
-below.
 
 Smoke-test from another terminal:
 ```bash
@@ -69,30 +73,29 @@ curl -s -X POST http://localhost:8000/chat \
   -H 'Content-Type: application/json' \
   -d '{
     "message": "Is the honeymoon suite available the first weekend in June?",
-    "session_id": "smoke-test-1",
+    "session_id": "smoke-1",
     "context": {}
   }' | jq
 
 # Reuse the same session_id to continue the conversation:
 curl -s -X POST http://localhost:8000/chat \
   -H 'Content-Type: application/json' \
-  -d '{"message": "What about for three nights?", "session_id": "smoke-test-1", "context": {}}' | jq
+  -d '{"message": "What about for three nights?", "session_id": "smoke-1", "context": {}}' | jq
 ```
 
-Serve the hotel website (separate terminal — agent is already on `:8000`):
+Serve the website (separate terminal — agent owns `:8000`):
 ```bash
 cd web/
 python3 -m http.server 5500
 # → open http://localhost:5500
 ```
 
-`web/index.html` already points `window.GRAND_MERIDIAN_AGENT_URL` at
-`http://localhost:8000/chat`, so no edit needed for local dev. CORS on the agent
-defaults to `*`, so the cross-port request works without further config.
+The committed default in `web/index.html` points
+`window.GRAND_MERIDIAN_AGENT_URL` at `http://localhost:8000/chat`, so local dev
+needs no edit. CORS on the agent defaults to `*`, so the cross-port request
+works without further config.
 
 ## Deploy to Agent Manager
-
-Settings (matching the standard Platform-Hosted Agent form):
 
 | Field             | Value                                                     |
 |-------------------|-----------------------------------------------------------|
@@ -107,27 +110,27 @@ Settings (matching the standard Platform-Hosted Agent form):
 
 Steps:
 
-1. In Agent Manager: Add Agent → Platform-Hosted Agent → fill the form above.
+1. In Agent Manager: **Add Agent → Platform-Hosted Agent** and fill the form
+   above.
 2. Configure env vars:
-   - `OPENAI_API_KEY_DEFAULT` (secret) — BYO key used until an LLM Service
+   - `OPENAI_API_KEY_DEFAULT` (secret) — BYO key, used until an LLM Service
      Provider is configured at the agent level.
    - `OPENAI_MODEL=gpt-4o`
-   - The agent listens on `8000` by default (`PORT` env var override
-     supported but unused in the AM deploy). The `Agent Interface: Chat
-     Agent (POST /chat, port 8000)` form field is what tells AM where to
-     route, not an env-var injection.
+3. Deploy. Agent Manager assigns a public URL for the agent.
+4. Point the widget at the deployed agent. Open the website with
+   `?agent=<deployed-url>` once — the widget persists it to `localStorage`
+   (key `gmAgentUrl`) and uses it on subsequent loads. `?agent=reset` clears it.
 
-   The Envoy gateway in front of the agent handles CORS, so no
-   `CORS_ALLOW_ORIGINS` env var is needed. If you've previously set one,
-   remove it from the Workload to keep the deploy config clean.
-3. Deploy. Endpoint will be exposed at the URL Agent Manager assigns.
-4. Update `web/index.html`'s `window.GRAND_MERIDIAN_AGENT_URL` to that URL.
+The agent listens on `8000`; the `Agent Interface: Chat Agent (POST /chat,
+port 8000)` form field is what tells the gateway where to route. The Envoy
+gateway in front of the agent handles CORS on the deployed path, so no
+`CORS_ALLOW_ORIGINS` env var is needed.
 
 ## LLM credentials and governance modes
 
 The agent supports two modes, switched purely by env injection. `OPENAI_URL`
-presence is the strict mode gate — the two key slots have distinct purposes
-and don't cross-fallback:
+presence is the mode gate — the two key slots have distinct purposes and
+don't cross-fallback:
 
 | Mode      | `OPENAI_URL` | `OPENAI_API_KEY` (AM-injected) | `OPENAI_API_KEY_DEFAULT` (BYO) | Outcome                              |
 |-----------|--------------|--------------------------------|--------------------------------|--------------------------------------|
@@ -135,31 +138,25 @@ and don't cross-fallback:
 | Governed  | set          | set                            | (ignored)                      | Routed via AM gateway with guardrails |
 
 In governed mode the AM gateway expects the key on a custom `API-Key` header
-(not `Authorization: Bearer`), per Agent Manager's documented sample. The
-resolver passes `api_key=""` to suppress the OpenAI SDK's default Authorization
-header and sets the custom header explicitly via `default_headers`. See
-`_resolve_llm_config()` in `agent.py`.
+(not `Authorization: Bearer`). The resolver passes `api_key=""` to suppress
+the OpenAI SDK's default `Authorization` header, then sets `API-Key` via
+`default_headers`. See `_resolve_llm_config()` in `agent.py` for the
+implementation.
 
-`OPENAI_API_KEY_DEFAULT` is for local development. In a production deploy,
-configure an LLM Service Provider at the org level so all traffic flows
-through governed credentials. `GET /health` reports the live mode:
+For production deploys, configure an **LLM Service Provider** at the org
+level so all traffic flows through governed credentials. `GET /health` reports
+the live mode:
 
 ```bash
 curl -s http://localhost:8000/health
 # → {"ok":true,"model":"gpt-4o","governed":false,"port":8000}
 ```
 
-## Knowing when the agent is ready after a redeploy
+## Readiness signal
 
-Agent Manager does not expose a Kubernetes readiness probe through its
-Workload CRD (verified — `Workload.spec.container` has no probe fields).
-After a redeploy, the gateway will route traffic to the pod the moment the
-container *starts*, not when uvicorn is actually listening on `:8000`. Hitting
-the agent during that window returns an Envoy 503 with `connection refused`.
-
-The agent emits a recognizable startup line as the in-band readiness signal.
-Watch the platform log panel (or `kubectl logs`) for it before sending
-traffic:
+After a redeploy, the agent emits a recognizable startup line so callers can
+confirm it's live before sending traffic. Watch the platform log panel (or
+`kubectl logs`) for it:
 
 ```
 READY {"ok": true, "model": "gpt-4o", "governed": true, "port": 8000}
@@ -167,62 +164,58 @@ READY {"ok": true, "model": "gpt-4o", "governed": true, "port": 8000}
 
 The payload is identical to `/health` — same source of truth — so the
 `governed` flag also confirms the env injection landed. If you see
-`governed: false` after configuring an LLM Service Provider, the env var
-contract is broken on the platform side.
+`governed: false` after configuring an LLM Service Provider, the env-var
+contract isn't reaching the agent.
 
-## The 10 scripted demo questions
+## Demo questions
 
-These are the rehearsed questions for the analyst briefing. The agent must
-answer all 10 cleanly before demo day.
+A walk-through of the agent's behavior end-to-end. These cover all three
+response paths the agent can take: tool call, hardcoded prompt response, and
+multi-tool trace.
 
 1. Is the honeymoon suite available for the first weekend in June?
 2. What's the price difference between a standard room and a deluxe suite?
-3. Can I get a late checkout? (graceful degradation — no tool call)
+3. Can I get a late checkout? *(no tool call — graceful degradation in the prompt)*
 4. What's on the room service menu?
 5. Do you have a vegetarian option for dinner?
 6. What are the best restaurants within walking distance?
 7. I have kids — is there anything nearby for families?
-8. What time does the pool open? (graceful degradation — no tool call)
-9. Can you book me a table at the rooftop bar? (graceful degradation — no tool call)
-10. Compare a junior suite and the presidential suite for a 3-night stay (multi-tool — trace climax)
+8. What time does the pool open? *(no tool call — graceful degradation)*
+9. Can you book me a table at the rooftop bar? *(no tool call — graceful degradation)*
+10. Compare a junior suite and the presidential suite for a 3-night stay *(multi-tool — rich trace)*
 
-Question 10 is the trace inspection question — it triggers multiple
-`check_room_availability` tool calls, making Agent Manager's trace panel
-visibly rich.
+Question 10 triggers multiple `check_room_availability` tool calls in a
+single turn — the trace panel shows each as a discrete OTEL GenAI span.
 
-## Act 4: External Agent (CrewAI on Laptop)
+## External agent sample (CrewAI on a laptop)
 
-**10-min segment.** Proves Agent Manager is framework-agnostic and cloud-agnostic by running a CrewAI agent on the presenter's laptop, connecting it to AM for tracing and LLM governance without any code changes. Full details: [`vip_crew/README.md`](vip_crew/README.md).
-
-### Setup (one-time)
+[`vip_crew/`](vip_crew/) is a CrewAI agent that runs anywhere — laptop, VM,
+another cloud — and gets Agent Manager's traces and LLM governance applied
+without any code changes. The integration is one CLI prefix:
 
 ```bash
 cd vip_crew
 uv venv && uv sync
 
-# Copy and fill .env.local
 cp ../.env.local.example ../.env.local
-# Edit: OPENAI_BASE_URL, OPENAI_API_KEY, AMP_OTEL_ENDPOINT, AMP_AGENT_API_KEY
-```
+# Fill in: OPENAI_BASE_URL, OPENAI_API_KEY, AMP_OTEL_ENDPOINT, AMP_AGENT_API_KEY
 
-### Demo triggers
-
-```bash
-cd vip_crew
 set -a; source ../.env.local; set +a
 
-# Trigger 1: trace demo. Watch agents stream live in the terminal.
+# Run it through the AM instrumentation wrapper:
 uv run amp-instrument python crew.py VIP-042
 
-# Trigger 2: governance trigger — Act 3 prompt decorator fires on pricing mention
+# With pricing flag (exercises governance / prompt-decoration on outbound LLM calls):
 uv run amp-instrument python crew.py VIP-203 --include-pricing
 ```
 
-VIPs available: `VIP-042` (Dr. Mei Tanaka), `VIP-101` (Marcus Chen), `VIP-203` (Sofia Reyes).
+Available VIPs: `VIP-042` (Dr. Mei Tanaka), `VIP-101` (Marcus Chen),
+`VIP-203` (Sofia Reyes).
 
-### What the analyst sees
+The CrewAI code itself has no AM-specific imports — the only change from a
+normal `python crew.py ...` invocation is the `amp-instrument` prefix. AM's
+trace panel lights up with CrewAI spans (`crew.kickoff` →
+`agent.execute_task` → LLM call), and any governance configured at the LLM
+Service Provider level applies to those calls.
 
-- Live agent reasoning streams in the terminal as the crew runs.
-- AM trace panel lights up with CrewAI spans (`crew.kickoff` → `agent.execute_task` → LLM call) — same panel, different framework.
-- Same Act 3 prompt decorator fires on the external agent's LLM calls (when `--include-pricing` is set).
-- The demo line: *"All I did was prefix my normal run command with `amp-instrument`. The agent has no AM-specific code."*
+Full details in [`vip_crew/README.md`](vip_crew/README.md).
