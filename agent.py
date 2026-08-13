@@ -78,13 +78,54 @@ def _resolve_llm_config() -> dict[str, Any]:
     return {"api_key": os.getenv("OPENAI_API_KEY_DEFAULT")}
 
 
+def _debug_http_client():
+    """When DUMP_LLM_PAYLOAD is truthy, return an httpx.Client that logs the raw
+    response the gateway sends for /chat/completions *before* the OpenAI SDK
+    parses it — this is where the `Unterminated string` JSONDecodeError fires.
+
+    Reading the body inside a response event hook is safe: httpx caches the
+    bytes, so the SDK still parses the same buffer (no stream consumption).
+    We log the header-declared length vs the actual byte count, which pinpoints
+    whether the gateway truncated the body or sent malformed JSON. Off by
+    default so normal runs don't dump response content to the logs."""
+    if not os.environ.get("DUMP_LLM_PAYLOAD"):
+        return None
+
+    import httpx
+
+    def _log_response(response: httpx.Response) -> None:
+        if "/chat/completions" not in str(response.url):
+            return
+        try:
+            response.read()  # cached; SDK re-reads from the same buffer
+            raw = response.content
+        except Exception as e:
+            # A truncated wire body surfaces here as RemoteProtocolError whose
+            # message reports received-vs-expected bytes — itself diagnostic.
+            log.warning("payload-dump read failed url=%s err=%s", response.url, e)
+            return
+        log.warning(
+            "payload-dump status=%s content-type=%s header_len=%s actual_len=%d body=%r",
+            response.status_code,
+            response.headers.get("content-type"),
+            response.headers.get("content-length"),
+            len(raw),
+            raw[:4000],
+        )
+
+    return httpx.Client(event_hooks={"response": [_log_response]}, timeout=60.0)
+
+
 def _get_agent():
     """Lazy so the module imports cleanly with no keys set (CI, linters,
     /health smoke tests). ChatOpenAI reads credentials on first instantiation,
     not at import time."""
     global _agent
     if _agent is None:
-        llm = ChatOpenAI(model=OPENAI_MODEL, **_resolve_llm_config())
+        cfg = _resolve_llm_config()
+        if (client := _debug_http_client()) is not None:
+            cfg["http_client"] = client
+        llm = ChatOpenAI(model=OPENAI_MODEL, **cfg)
         _agent = create_react_agent(llm, tools=LANGCHAIN_TOOLS, prompt=SYSTEM_PROMPT)
     return _agent
 
