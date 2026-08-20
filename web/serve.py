@@ -224,7 +224,10 @@ def main() -> None:
     else:
         sys.exit(f"Unknown AUTH_MODE {mode!r}. Use none, broker or pkce.")
 
-    print("\n  Ctrl-C to stop.\n")
+    # Flush explicitly: the banner is the only place the active auth mode is
+    # stated, and Python buffers stdout when it is not a TTY (nohup, tee, a
+    # supervisor), which would hide it exactly when it matters most.
+    print("\n  Ctrl-C to stop.\n", flush=True)
     ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
 
 
