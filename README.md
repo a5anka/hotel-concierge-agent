@@ -1,241 +1,147 @@
-# Hotel Concierge — A WSO2 Agent Manager Sample
+# Hotel Booking Agent — WSO2 Agent Manager test fixture
 
-A complete sample agent for WSO2 Agent Manager. A hotel concierge built on
-LangGraph + OpenAI, deployed via Agent Manager, observed through the platform's
-trace panel, and consumed from a static landing page via a vanilla JS chat
-widget.
+A complete, deliberately imperfect agent system for the Agent Manager
+end-to-end UX study. Everything here exists to let a participant take a
+realistic agent from source to a controlled production deployment, and to let a
+facilitator see exactly where the platform helps and where it does not.
 
-Use this repo as a reference for:
+This is a **test fixture, not a sample application.** It ships with a seeded
+defect, a seeded authorisation weakness and two deliberate prompt omissions.
+All of them are load-bearing, all are pinned by tests, and all are documented.
 
-- The **Platform-Hosted Agent** chat contract (`POST /chat`).
-- **BYO vs governed** LLM credential modes (env-injection-driven, no code changes).
-- **In-band readiness signaling** via a `READY` log line.
-- A **framework-agnostic** integration: the same AM tracing + LLM governance
-  applied to a CrewAI agent running outside AM (see [`vip_crew/`](vip_crew/)).
+> **Start here:** [`docs/facilitator-guide.md`](docs/facilitator-guide.md) for
+> the four stages, the seeded defects and the reference solutions.
+> [`docs/participant-briefs.md`](docs/participant-briefs.md) for what the
+> participants actually see. Do not give them the facilitator guide.
 
-## Repo layout
-
-```
-.
-├── main.py             Entry point. Agent Manager start command: `python main.py`.
-├── agent.py            FastAPI app + LangGraph tool-calling loop. POST /chat keyed by session_id.
-├── tools.py            3 hotel tools (room availability, room-service menu, local recs).
-├── hotel_data.py       Single source of truth for rooms, menu, recommendations.
-├── system_prompt.py    Concierge persona prompt.
-├── requirements.txt    openai, fastapi, uvicorn, langgraph, pytest.
-├── tests/              Unit tests (~1s).
-├── web/
-│   ├── index.html      "The Grand Meridian" landing page (Tailwind via CDN).
-│   └── widget.js       Vanilla JS chat widget, ~250 lines, no build step.
-└── vip_crew/           External CrewAI sample — see vip_crew/README.md.
-```
-
-## Chat interface (Platform-Hosted Agent contract)
+## Layout
 
 ```
-POST /chat   (port 8000)
-Request:  {"message": "string", "session_id": "string", "context": {}}
-Response: {"response": "string"}
+agent/hotel-agent/      The agent under test. LangGraph + OpenAI, Chat Agent contract.
+mcp/hotel-mcp/          Booking MCP server. 7 tools split read/write, seeded data.
+evaluators/security/    7 category judges + shared rubric.
+evaluators/quality/     Which built-in evaluator to use where, + 1 custom judge.
+fixtures/               36 quality cases with ground truth, 43 security cases.
+scripts/                Traffic generation, cost burn, fixture reset, bring-up.
+web/                    Guest console. The OAuth2 client for Exercise 1.
+docs/                   Facilitator guide and participant briefs.
+vip_crew/               External CrewAI agent, for the external-agent extension.
 ```
 
-Conversation state is kept server-side, keyed by `session_id`. The client sends
-one user message per turn; the server stitches the thread together. `context`
-is accepted per the contract and logged into the trace, but is not currently
-injected into the prompt.
+## What is deliberately wrong
 
-## Run locally
+| # | Where | What | Used by |
+|---|---|---|---|
+| 1 | `agent/hotel-agent/mcp_client.py` | Date compatibility layer writes the wrong date and echoes the request back, so the reply looks correct | Exercise 1 |
+| 2 | `agent/hotel-agent/auth.py` | One static API key for every deployment. No agent identity, so no per-caller policy is possible | Exercise 3 |
+| 3 | `mcp/hotel-mcp` | `HOTEL_MCP_ENFORCE_GUEST_SCOPE=false` — any `booking:read` caller can read any booking | Exercise 4, category 4 |
+| 4 | `agent/hotel-agent/system_prompt.py` | No injection hardening, no terms-and-conditions instruction | Exercises 2 and 4 |
+| 5 | `mcp/hotel-mcp/seed/bookings.json`, `policies.py` | Two planted injection payloads, in a booking record and in a policy document | Exercise 4, categories 2 and 3 |
+| 6 | `agent/hotel-agent/system_prompt.py` | `SYSTEM_PROMPT_VARIANT=broken` strips grounding without touching a tool | Exercise 4 regression |
 
-Install deps:
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
+`agent/hotel-agent/tests/` pins 1 and 4 in place. Run `pytest tests/ -q` before
+every session; 47 tests, about ten seconds. If they fail, someone has repaired
+the fixture and the exercises they support no longer work.
 
-Run unit tests:
-```bash
-pytest tests/ -v
-```
+## The four exercises at a glance
 
-Start the agent:
-```bash
-export OPENAI_API_KEY_DEFAULT=sk-...    # local-dev key (BYO mode)
-export OPENAI_MODEL=gpt-4o
-python main.py
-# → listening on http://localhost:8000
-```
+| | Goal | Turns on |
+|---|---|---|
+| **1** | Deploy, find why a plausible answer is wrong, promote, recover | Reading a trace to separate the model's decision from the agent's behaviour |
+| **2** | Cost ceiling, injection guardrail, terms-and-conditions decorator | Platform controls applied without touching business logic |
+| **3** | Read-only customer agent, read-write ops agent, same source | Agent identity and per-tool scopes |
+| **4** | Quality and security evaluation, then production monitoring | Whether a score can be traced back to evidence |
 
-Smoke-test from another terminal:
-```bash
-curl -s http://localhost:8000/health
-
-curl -s -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "message": "Is the honeymoon suite available the first weekend in June?",
-    "session_id": "smoke-1",
-    "context": {}
-  }' | jq
-
-# Reuse the same session_id to continue the conversation:
-curl -s -X POST http://localhost:8000/chat \
-  -H 'Content-Type: application/json' \
-  -d '{"message": "What about for three nights?", "session_id": "smoke-1", "context": {}}' | jq
-```
-
-Serve the website (separate terminal — agent owns `:8000`):
-```bash
-cd web/
-python3 -m http.server 5500
-# → open http://localhost:5500
-```
-
-The committed default in `web/index.html` points
-`window.GRAND_MERIDIAN_AGENT_URL` at `http://localhost:8000/chat`, so local dev
-needs no edit. CORS on the agent defaults to `*`, so the cross-port request
-works without further config.
-
-## Deploy to Agent Manager
-
-| Field             | Value                                                     |
-|-------------------|-----------------------------------------------------------|
-| Display Name      | `Grand Meridian Concierge`                                |
-| GitHub Repository | `https://github.com/a5anka/hotel-concierge-agent`         |
-| Branch            | `main`                                                    |
-| App Path          | `.` (repo root)                                           |
-| Language          | `Python`                                                  |
-| Language Version  | `3.11`                                                    |
-| Start Command     | `python main.py`                                          |
-| Agent Interface   | `Chat Agent` (POST /chat, port 8000)                      |
-
-Steps:
-
-1. In Agent Manager: **Add Agent → Platform-Hosted Agent** and fill the form
-   above.
-2. Configure env vars:
-   - `OPENAI_API_KEY_DEFAULT` (secret) — BYO key, used until an LLM Service
-     Provider is configured at the agent level.
-   - `OPENAI_MODEL=gpt-4o`
-3. Deploy. Agent Manager assigns a public URL for the agent.
-4. Point the widget at the deployed agent. Open the website with
-   `?agent=<deployed-url>` once — the widget persists it to `localStorage`
-   (key `gmAgentUrl`) and uses it on subsequent loads. `?agent=reset` clears it.
-
-The agent listens on `8000`; the `Agent Interface: Chat Agent (POST /chat,
-port 8000)` form field is what tells the gateway where to route. The Envoy
-gateway in front of the agent handles CORS on the deployed path, so no
-`CORS_ALLOW_ORIGINS` env var is needed.
-
-## LLM credentials and governance modes
-
-The agent supports two modes, switched purely by env injection. `OPENAI_URL`
-presence is the mode gate — the two key slots have distinct purposes and
-don't cross-fallback:
-
-| Mode      | `OPENAI_URL` | `OPENAI_API_KEY` (AM-injected) | `OPENAI_API_KEY_DEFAULT` (BYO) | Outcome                              |
-|-----------|--------------|--------------------------------|--------------------------------|--------------------------------------|
-| BYO       | unset        | (ignored)                      | set                            | Direct OpenAI, no governance         |
-| Governed  | set          | set                            | (ignored)                      | Routed via AM gateway with guardrails |
-
-In governed mode the AM gateway expects the key on a custom `API-Key` header
-(not `Authorization: Bearer`). The resolver passes `api_key=""` to suppress
-the OpenAI SDK's default `Authorization` header, then sets `API-Key` via
-`default_headers`. See `_resolve_llm_config()` in `agent.py` for the
-implementation.
-
-For production deploys, configure an **LLM Service Provider** at the org
-level so all traffic flows through governed credentials. `GET /health` reports
-the live mode:
+## Quick start
 
 ```bash
-curl -s http://localhost:8000/health
-# → {"ok":true,"model":"gpt-4o","governed":false,"port":8000}
+# 1. booking server
+cd mcp/hotel-mcp && pip install -r requirements.txt
+export HOTEL_MCP_API_KEYS='dev-read;booking:read;customer-agent;guest-priya,dev-write;booking:read|booking:write;ops-agent'
+python server.py &                              # -> :9000/mcp
+
+# 2. agent
+cd ../../agent/hotel-agent && pip install -r requirements.txt
+pytest tests/ -q                                # 47 passed
+export OPENAI_API_KEY_DEFAULT=sk-...
+export HOTEL_MCP_URL=http://localhost:9000/mcp HOTEL_MCP_API_KEY=dev-read
+python main.py &                                # -> :8000
+
+# 3. confirm the Exercise 1 defect reproduces
+curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' -d '{
+  "message": "This is Priya Raman, booking reference GM-4471. Please move my stay to check in on 6 April 2026, still three nights.",
+  "session_id": "check", "context": {"guest_id": "guest-priya", "guest_name": "Priya Raman"}}' | jq -r .response
+# says 6 April
+
+curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' -d '{
+  "message": "Read that booking back to me.", "session_id": "check",
+  "context": {"guest_id": "guest-priya", "guest_name": "Priya Raman"}}' | jq -r .response
+# says 4 June
 ```
 
-### Example: a compliance prompt decorator
+If those two replies disagree, the fixture is healthy.
 
-Beyond credential routing, AM's LLM Service Provider can attach a **prompt
-decorator** that augments every outbound LLM call without any change to agent
-code. The concierge's governed deploy uses one such decorator to enforce a
-pricing-disclosure policy:
-
-> If your response mentions pricing, rates, or availability ANYWHERE, append
-> exactly one line — and only one — at the very end of the entire response,
-> AFTER any signature line: *"See our [terms and conditions](https://grandmeridian.example/terms)
-> for confirmation of rates and availability."* Do not insert this line at the
-> end of paragraphs, lists, or sections — only at the absolute end of the
-> response. If this line already appears in the response, do NOT add another.
-
-The decorator is configured in the AM admin UI (on the LLM Service Provider,
-or as an agent-level override) and applies uniformly to every LLM call routed
-through the gateway — including calls from the external CrewAI agent below.
-The agent code has no awareness of it, which is the point: governance lives
-at the platform, not in app code.
-
-## Readiness signal
-
-After a redeploy, the agent emits a recognizable startup line so callers can
-confirm it's live before sending traffic. Watch the platform log panel (or
-`kubectl logs`) for it:
-
-```
-READY {"ok": true, "model": "gpt-4o", "governed": true, "port": 8000}
-```
-
-The payload is identical to `/health` — same source of truth — so the
-`governed` flag also confirms the env injection landed. If you see
-`governed: false` after configuring an LLM Service Provider, the env-var
-contract isn't reaching the agent.
-
-## Demo questions
-
-A walk-through of the agent's behavior end-to-end. These cover all three
-response paths the agent can take: tool call, hardcoded prompt response, and
-multi-tool trace.
-
-1. Is the honeymoon suite available for the first weekend in June?
-2. What's the price difference between a standard room and a deluxe suite?
-3. Can I get a late checkout? *(no tool call — graceful degradation in the prompt)*
-4. What's on the room service menu?
-5. Do you have a vegetarian option for dinner?
-6. What are the best restaurants within walking distance?
-7. I have kids — is there anything nearby for families?
-8. What time does the pool open? *(no tool call — graceful degradation)*
-9. Can you book me a table at the rooftop bar? *(no tool call — graceful degradation)*
-10. Compare a junior suite and the presidential suite for a 3-night stay *(multi-tool — rich trace)*
-
-Question 10 triggers multiple `check_room_availability` tool calls in a
-single turn — the trace panel shows each as a discrete OTEL GenAI span.
-
-## External agent sample (CrewAI on a laptop)
-
-[`vip_crew/`](vip_crew/) is a CrewAI agent that runs anywhere — laptop, VM,
-another cloud — and gets Agent Manager's traces and LLM governance applied
-without any code changes. The integration is one CLI prefix:
+## Running the evaluation suites
 
 ```bash
-cd vip_crew
-uv venv && uv sync
-
-cp ../.env.local.example ../.env.local
-# Fill in: OPENAI_BASE_URL, OPENAI_API_KEY, AMP_OTEL_ENDPOINT, AMP_AGENT_API_KEY
-
-set -a; source ../.env.local; set +a
-
-# Run it through the AM instrumentation wrapper:
-uv run amp-instrument python crew.py VIP-042
-
-# With pricing flag — response triggers the disclosure decorator from the governance section above:
-uv run amp-instrument python crew.py VIP-203 --include-pricing
+python scripts/run_script_a.py --agent-url https://<agent>/chat --token <jwt>
+python scripts/run_script_b.py --agent-url https://<customer>/chat --deployment customer
+python scripts/run_script_b.py --agent-url https://<ops>/chat --deployment ops
 ```
 
-Available VIPs: `VIP-042` (Dr. Mei Tanaka), `VIP-101` (Marcus Chen),
-`VIP-203` (Sofia Reyes).
+Every request uses the case id as its session id, so any result in the console
+traces back to exactly one fixture line. Every security score is **resilience**:
+higher is better.
 
-The CrewAI code itself has no AM-specific imports — the only change from a
-normal `python crew.py ...` invocation is the `amp-instrument` prefix. AM's
-trace panel lights up with CrewAI spans (`crew.kickoff` →
-`agent.execute_task` → LLM call), and any governance configured at the LLM
-Service Provider level applies to those calls.
+Between participants:
 
-Full details in [`vip_crew/README.md`](vip_crew/README.md).
+```bash
+HOTEL_MCP_ADMIN_TOKEN=... python scripts/reset_fixture.py --mcp-url https://<mcp>
+```
+
+## The console
+
+`web/` is the guest-facing site and chat widget, and the client the participant
+connects in Exercise 1. It runs in one of three modes, chosen by a flag and a
+config file:
+
+```bash
+python web/serve.py --no-auth     # no security: browser calls the agent directly
+python web/serve.py               # secured: an OAuth2 access token on every call
+```
+
+Secured mode has two shapes. `broker` keeps the client id and secret on the dev
+server and hands the browser only a short-lived token; `pkce` uses
+authorization-code + PKCE and involves no secret at all.
+
+The agent performs **no** authentication. The platform gateway in front of it
+validates the token, and `agent/hotel-agent/agent.py` contains no inbound auth
+logic — verified, and it must stay that way. An agent that checks its own tokens
+is not testing the platform. Full detail in [`web/README.md`](web/README.md).
+
+## Tracing
+
+None in this repository, by design. Agent Manager's auto-instrumentation supplies
+it; keep that toggle ON. Exercise 1 is unsolvable without those spans, so confirm
+they arrive before the first session. Do not add a local OTEL init — it would
+double-instrument and distort the trace shape under evaluation.
+
+## Credentials
+
+No credential is committed anywhere in this repository, and none should be.
+Every value arrives as an environment variable or a platform secret. The web
+widget in `agent/hotel-agent/web/` runs in the browser and must never be given
+a key — watching whether a participant respects that is part of Exercise 1.
+
+Generate your own keys for `HOTEL_MCP_API_KEYS` and `HOTEL_MCP_ADMIN_TOKEN`,
+and use different ones in development and production. Environment isolation is
+one of the things the study observes.
+
+## Before the first session
+
+Four things in the facilitator guide need settling against the live console,
+because each one changes the setup or the brief: whether MCP scoping works per
+tool or only per proxy, whether evaluators can see tool calls, whether results
+can be grouped by a custom category label, and whether a cost ceiling can be
+scoped to a single agent. See
+[Open questions](docs/facilitator-guide.md#open-questions-to-settle-before-the-first-session).

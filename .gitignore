@@ -10,3 +10,5 @@ venv/
 .gstack/
 CLAUDE.md
 DEMO.md
+dev/
+fixtures/script_*_results*.jsonl

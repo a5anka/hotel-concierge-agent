@@ -1,5 +1,10 @@
 # TODOS
 
+> Historical log from the original concierge demo, kept for the dependency
+> notes. Paths have moved: `requirements.txt`, `agent.py` and `tests/` are now
+> under `agent/hotel-agent/`. For the current fixture see
+> [docs/facilitator-guide.md](docs/facilitator-guide.md).
+
 ## Pre-flight: hello-world deploy validation
 
 **What:** Push a 5-line `print("hello")` agent stub to a throwaway GitHub repo, connect it to Agent Manager, deploy. Verify the repo layout assumption (`agent.py` + `requirements.txt`, no Procfile/Dockerfile needed) before writing the real agent.
@@ -19,6 +24,14 @@
 **Status (2026-04-30):** Done. Real agent shipped, pre-flight assumption held.
 
 ## Drop `wrapt<2` pin once upstream ships fix
+
+**RESOLVED 2026-08-20, differently.** Local instrumentation was removed from the
+agent entirely: `tracing.py`, its tests, and both the `traceloop-sdk` and
+`wrapt<2` pins are gone. Tracing now comes from Agent Manager's
+auto-instrumentation, so the platform owns that dependency resolution and this
+repository has no opinion on the wrapt version. The notes below are kept only as
+background on why the pin existed.
+
 
 **What:** Remove the `wrapt<2` pin in `requirements.txt` and let it resolve to wrapt 2.x.
 

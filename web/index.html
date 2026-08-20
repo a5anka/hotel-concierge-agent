@@ -41,6 +41,10 @@
   .room-3 { background-image: url('https://images.unsplash.com/photo-1582719508461-905c673771fd?auto=format&fit=crop&w=1200&q=80'); }
 </style>
 <!-- Configure the deployed agent endpoint URL for the chat widget. -->
+<!-- Last-resort default only. The normal path is web/serve.py, which serves
+     /auth/config with the agent URL, the auth mode and the acting guest. This
+     global is used only when the page is opened behind a plain static server,
+     which forces unsecured mode. Override for one load with ?agent=<url>. -->
 <script>window.GRAND_MERIDIAN_AGENT_URL = "http://localhost:8000/chat";</script>
 </head>
 <body class="bg-white">
@@ -132,11 +136,13 @@
 
 <!-- Chat widget mounts here -->
 <div id="concierge-widget"></div>
-<!-- Markdown rendering: marked parses, DOMPurify sanitizes LLM output before innerHTML.
-     Both deferred and listed before widget.js so they execute in document order — marked
-     and DOMPurify are guaranteed loaded by the time the widget's IIFE runs. -->
+<!-- Order matters, all deferred so they execute in document order:
+     marked parses LLM markdown, DOMPurify sanitizes it before innerHTML, and
+     auth.js defines window.GM_AUTH, which widget.js calls on boot and on every
+     send. All three are guaranteed loaded by the time the widget's IIFE runs. -->
 <script src="https://cdn.jsdelivr.net/npm/marked@13.0.3/marked.min.js" defer></script>
 <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
+<script src="auth.js" defer></script>
 <script src="widget.js" defer></script>
 
 </body>

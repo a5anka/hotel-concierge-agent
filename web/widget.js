@@ -1,23 +1,26 @@
 // The Grand Meridian — concierge chat widget.
 //
-// Vanilla JS, no build step. Two CDN deps loaded by index.html before this file:
-// `marked` (markdown parser) and `DOMPurify` (sanitizer) — both required for
-// rendering bot replies as markdown. User messages stay escaped (no markdown).
-// Stateless server: this widget keeps the full message thread in memory and sends
-// it on every POST. Five UI states: empty (greeting + chips), loading, success,
-// error, tool-running. Anchored bottom-right at 32px margin.
+// Vanilla JS, no build step. Three deps loaded by index.html before this file:
+// `marked` (markdown parser), `DOMPurify` (sanitizer), and auth.js which
+// supplies window.GM_AUTH. User messages stay escaped (no markdown).
+//
+// The agent is expected to sit behind the platform's OAuth2 gateway. This widget
+// attaches whatever Authorization header GM_AUTH provides and does nothing else
+// about auth — the gateway validates, the agent has no auth logic of its own.
+// Run `web/serve.py --no-auth` to drive an unprotected agent instead.
 (() => {
   "use strict";
 
   // Endpoint resolution precedence:
   //   1. ?agent=<url>      — overrides and persists to localStorage. ?agent=reset clears.
   //   2. localStorage      — sticky across reloads once set via the query param.
-  //   3. window.GRAND_MERIDIAN_AGENT_URL (set in index.html, the committed default).
-  //   4. http://localhost:8000/chat.
-  // Demo flow: paste `?agent=<deployed-url>` once, reload — sticks until ?agent=reset.
-  const ENDPOINT = (() => {
+  //   3. /auth/config      — served by web/serve.py, the normal path.
+  //   4. window.GRAND_MERIDIAN_AGENT_URL (the committed default in index.html).
+  //   5. http://localhost:8000/chat.
+  // In a deployed setup this should be the gateway URL, not the agent's own address.
+  const endpointOverride = (() => {
     const LS_KEY = "gmAgentUrl";
-    const fallback = window.GRAND_MERIDIAN_AGENT_URL || "http://localhost:8000/chat";
+    const fallback = null;
     let fromQuery = null;
     try {
       fromQuery = new URLSearchParams(window.location.search).get("agent");
@@ -37,6 +40,16 @@
     } catch (_) {}
     return fallback;
   })();
+
+  function resolveEndpoint() {
+    return (
+      endpointOverride ||
+      (window.GM_AUTH && window.GM_AUTH.agentUrl()) ||
+      window.GRAND_MERIDIAN_AGENT_URL ||
+      "http://localhost:8000/chat"
+    );
+  }
+
   const PANEL_W = 380;
   const PANEL_H = 560;
 
@@ -100,7 +113,7 @@
       <div style="font-family:'Playfair Display',serif;font-size:16px;font-weight:600;letter-spacing:0.02em;">
         Ask our concierge
       </div>
-      <div style="font-size:11px;color:#cfd6e3;letter-spacing:0.06em;">● Available now</div>
+      <div id="cm-status" style="font-size:11px;color:#cfd6e3;letter-spacing:0.06em;">● Available now</div>
     </div>
     <button id="cm-close" aria-label="Close chat"
       style="margin-left:auto;background:none;border:none;color:#cfd6e3;font-size:22px;line-height:1;cursor:pointer;">×</button>
@@ -278,12 +291,16 @@
     launcher.style.display = "none";
     if (firstOpen) {
       firstOpen = false;
+      paintStatus();
+      if (needsSignIn()) {
+        renderSignIn();
+        setSendingState(true);
+        return;
+      }
       renderBot(GREETING, { greeting: true });
       renderChips();
-      input.focus();
-    } else {
-      input.focus();
     }
+    input.focus();
   }
 
   function closePanel() {
@@ -293,6 +310,47 @@
 
   launcher.addEventListener("click", openPanel);
   document.getElementById("cm-close").addEventListener("click", closePanel);
+
+  // ---- auth status ----
+  const statusEl = document.getElementById("cm-status");
+
+  function paintStatus() {
+    if (!statusEl) return;
+    const s = window.GM_AUTH ? window.GM_AUTH.state() : { mode: "none", ready: true };
+    const g = window.GM_AUTH ? window.GM_AUTH.guest() : {};
+    const who = g && g.name ? ` · ${escapeHtml(g.name)}` : "";
+    if (s.mode === "none") {
+      statusEl.innerHTML = `<span style="color:#F0C674">● unsecured</span>${who}`;
+      statusEl.title = "No token is being sent. Only valid against an unprotected agent.";
+    } else if (s.ready) {
+      statusEl.innerHTML = `<span style="color:#8FD8A0">● secured (${escapeHtml(s.mode)})</span>${who}`;
+      statusEl.title = "An OAuth2 access token is attached to every request. The gateway validates it.";
+    } else {
+      statusEl.innerHTML = `<span style="color:#F4A8A0">● not authorised</span>${who}`;
+      statusEl.title = s.reason || "";
+    }
+  }
+
+  function needsSignIn() {
+    const s = window.GM_AUTH ? window.GM_AUTH.state() : { ready: true };
+    return s.mode === "pkce" && !s.ready;
+  }
+
+  function renderSignIn(reason) {
+    const wrap = el("div", `align-self:center;text-align:center;padding:8px 0;`);
+    wrap.appendChild(el("div",
+      `font-size:13px;color:#6b6b6b;margin-bottom:10px;line-height:1.5;`,
+      escapeHtml(reason || "Please sign in to speak with the concierge.")));
+    const btn = el("button",
+      `background:#1B2B4B;color:#C9A84C;border:none;font-family:inherit;font-size:13px;
+       padding:9px 18px;cursor:pointer;letter-spacing:0.04em;`, "Sign in");
+    btn.addEventListener("click", () => {
+      window.GM_AUTH.signIn().catch((e) => showToast(String(e.message || e)));
+    });
+    wrap.appendChild(btn);
+    thread.appendChild(wrap);
+    scrollToBottom();
+  }
 
   inputRow.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -307,17 +365,43 @@
     setSendingState(true);
     const typing = renderTyping();
 
+    let headers = { "Content-Type": "application/json" };
     try {
-      const res = await fetch(ENDPOINT, {
+      // Throws in pkce mode when not signed in, and in broker mode when the
+      // token endpoint is unreachable or unconfigured. Both are worth showing
+      // plainly rather than as a generic network error.
+      Object.assign(headers, await window.GM_AUTH.authHeaders());
+    } catch (e) {
+      typing.remove();
+      setSendingState(false);
+      showToast(String((e && e.message) || e));
+      paintStatus();
+      return;
+    }
+
+    // `context` is client-asserted. The agent trusts it, which is exactly what
+    // the cross-user security cases probe. In a real deployment the guest
+    // identity should come from the validated token, not from here.
+    const g = window.GM_AUTH.guest();
+
+    try {
+      const res = await fetch(resolveEndpoint(), {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           message: text,
           session_id: SESSION_ID,
-          context: {},
+          context: g && g.id ? { guest_id: g.id, guest_name: g.name } : {},
         }),
       });
       typing.remove();
+      if (res.status === 401 || res.status === 403) {
+        // The gateway rejected the token. Nothing the agent did.
+        showToast(`Gateway rejected the request (${res.status}). Token missing, expired or wrong scope.`);
+        setSendingState(false);
+        paintStatus();
+        return;
+      }
       if (!res.ok) {
         showToast(`Concierge offline (${res.status}). Retry?`);
         setSendingState(false);
@@ -335,6 +419,17 @@
       input.focus();
     }
   }
+
+  // Resolve the auth config before first paint so the header shows the real
+  // mode rather than flickering from unsecured to secured.
+  (async () => {
+    try {
+      if (window.GM_AUTH) await window.GM_AUTH.init();
+    } catch (e) {
+      console.warn("auth init failed", e);
+    }
+    paintStatus();
+  })();
 
   // Typing-dot animation + markdown styles, scoped so they only apply inside the bubble.
   const styleTag = document.createElement("style");

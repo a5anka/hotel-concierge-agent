@@ -1,0 +1,161 @@
+#!/usr/bin/env bash
+# Bring the whole fixture up locally: hotel-mcp and hotel-agent.
+#
+#   ./scripts/dev_up.sh
+#   MCP_PORT=9100 AGENT_PORT=8000 ./scripts/dev_up.sh
+#
+# Generates dev/.env on first run with fresh local fixture keys. Put your model
+# credential in there; everything else is filled in for you. dev/ is gitignored.
+#
+# Logs go to dev/mcp.log and dev/agent.log. Stop with ./scripts/dev_down.sh.
+
+set -euo pipefail
+cd "$(dirname "$0")/.."
+ROOT=$(pwd)
+VENV="$ROOT/.venv"
+MCP_PORT="${MCP_PORT:-9100}"
+AGENT_PORT="${AGENT_PORT:-8000}"
+mkdir -p dev
+
+if [ ! -x "$VENV/bin/python" ]; then
+  echo "No .venv found. Create it first:"
+  echo "  python3 -m venv .venv"
+  echo "  .venv/bin/pip install -r agent/hotel-agent/requirements.txt -r mcp/hotel-mcp/requirements.txt"
+  exit 1
+fi
+
+port_busy() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
+for spec in "MCP_PORT:$MCP_PORT" "AGENT_PORT:$AGENT_PORT"; do
+  name=${spec%%:*}; port=${spec##*:}
+  if port_busy "$port"; then
+    echo "Port $port is already in use (needed for $name). Something else owns it:"
+    lsof -nP -iTCP:"$port" -sTCP:LISTEN | tail -n +2 | awk '{print "  " $1 " (pid " $2 ")"}'
+    echo "Pick another: $name=<port> ./scripts/dev_up.sh"
+    exit 1
+  fi
+done
+
+if [ ! -f dev/.env ]; then
+  echo "Generating dev/.env with fresh local keys..."
+  CUST=$("$VENV/bin/python" -c 'import secrets;print("cust_"+secrets.token_urlsafe(18))')
+  OPS=$("$VENV/bin/python" -c 'import secrets;print("ops_"+secrets.token_urlsafe(18))')
+  ADMIN=$("$VENV/bin/python" -c 'import secrets;print(secrets.token_urlsafe(24))')
+  cat > dev/.env <<ENV
+# Local fixture keys, generated $(date -u +%Y-%m-%dT%H:%M:%SZ). Local use only.
+# Never reuse these in a shared deployment.
+
+# ---- PUT YOUR MODEL CREDENTIAL HERE -----------------------------------------
+# These are left COMMENTED so they cannot clobber a value already set in the
+# repo root .env, which is sourced first. Uncomment whichever mode you want.
+#
+# BYO mode: a real OpenAI key. This is the slot the agent reads when OPENAI_URL
+# is empty. A key in OPENAI_API_KEY instead is ignored - the two slots do not
+# cross-fall-back, by design.
+#OPENAI_API_KEY_DEFAULT=sk-...
+#
+# Governed mode instead: set both of these and leave the one above commented.
+#OPENAI_URL=https://<project>-<component>.example/<endpoint>/
+#OPENAI_API_KEY=<AM JWT>
+
+OPENAI_MODEL=gpt-4o
+# -----------------------------------------------------------------------------
+
+CUSTOMER_KEY=$CUST
+OPS_KEY=$OPS
+HOTEL_MCP_ADMIN_TOKEN=$ADMIN
+
+# Which credential the agent presents to hotel-mcp.
+#
+# Defaults to the write-capable key, because Exercises 1 and 2 happen BEFORE
+# least-privilege is configured: at that point one deployment does everything,
+# including moving and cancelling bookings.
+#
+# For Exercise 3, set this to \$OPS_KEY on the operations deployment and
+# \$CUSTOMER_KEY on the customer-facing one, and restart.
+AGENT_MCP_KEY=$OPS
+
+SYSTEM_PROMPT_VARIANT=baseline
+HOTEL_MCP_LEGACY_DATE_COMPAT=true
+ENV
+  echo "  -> dev/.env created. Add a model credential before the agent can answer."
+fi
+
+# Root .env first (where a personal model credential usually lives), then
+# dev/.env so the generated fixture values win on the keys they define.
+if [ -f .env ]; then set -a; . ./.env; set +a; fi
+set -a; . dev/.env; set +a
+
+# The two model-key slots have distinct purposes and deliberately do not
+# cross-fall-back, so a key in the wrong one silently yields no credential.
+# Warn rather than auto-mapping: this is exactly the misconfiguration the
+# fixture exists to surface, and papering over it here would hide it.
+if [ -z "${OPENAI_URL:-}" ] && [ -z "${OPENAI_API_KEY_DEFAULT:-}" ] && [ -n "${OPENAI_API_KEY:-}" ]; then
+  case "${OPENAI_API_KEY}" in
+    sk-*)
+      # A plain OpenAI key sitting in the governed-mode slot with no gateway
+      # URL. For a local run, map it into the BYO slot rather than starting
+      # without a credential. This is a convenience of THIS script only - the
+      # agent's two key slots still do not cross-fall-back, which is what a
+      # deployed environment exercises.
+      export OPENAI_API_KEY_DEFAULT="$OPENAI_API_KEY"
+      unset OPENAI_API_KEY
+      echo
+      echo "NOTE: found a plain OpenAI key in OPENAI_API_KEY with no OPENAI_URL set."
+      echo "      Mapped it to OPENAI_API_KEY_DEFAULT (BYO mode) for this local run."
+      echo "      The agent itself does not do this - on a real deployment put the"
+      echo "      key in the slot that matches the mode you want."
+      ;;
+    *)
+      echo
+      echo "WARNING: OPENAI_API_KEY is set but OPENAI_URL is not, so the agent is in"
+      echo "         BYO mode and reads OPENAI_API_KEY_DEFAULT, which is empty."
+      echo "         For a governed deploy set OPENAI_URL as well."
+      ;;
+  esac
+fi
+
+export HOTEL_MCP_API_KEYS="${CUSTOMER_KEY};booking:read;customer-agent;guest-priya,${OPS_KEY};booking:read|booking:write;ops-agent"
+export HOTEL_MCP_REQUIRE_AUTH=true
+export HOTEL_MCP_ENFORCE_GUEST_SCOPE=false
+export HOTEL_MCP_URL="http://127.0.0.1:${MCP_PORT}/mcp"
+export HOTEL_MCP_API_KEY="${AGENT_MCP_KEY}"
+
+wait_for() {
+  for _ in $(seq 1 60); do
+    curl -sf "$1" >/dev/null 2>&1 && return 0
+    sleep 0.5
+  done
+  return 1
+}
+
+echo
+echo "Starting hotel-mcp on :${MCP_PORT} ..."
+( cd mcp/hotel-mcp; PORT="$MCP_PORT" exec "$VENV/bin/python" server.py ) \
+  >"$ROOT/dev/mcp.log" 2>&1 &
+echo $! > "$ROOT/dev/mcp.pid"
+wait_for "http://127.0.0.1:${MCP_PORT}/health" || { echo "hotel-mcp did not come up. Tail of dev/mcp.log:"; tail -20 dev/mcp.log; exit 1; }
+curl -s "http://127.0.0.1:${MCP_PORT}/health" | jq .
+
+echo
+echo "Starting hotel-agent on :${AGENT_PORT} ..."
+( cd agent/hotel-agent; PORT="$AGENT_PORT" exec "$VENV/bin/python" main.py ) \
+  >"$ROOT/dev/agent.log" 2>&1 &
+echo $! > "$ROOT/dev/agent.pid"
+wait_for "http://127.0.0.1:${AGENT_PORT}/health" || { echo "agent did not come up. Tail of dev/agent.log:"; tail -20 dev/agent.log; exit 1; }
+curl -s "http://127.0.0.1:${AGENT_PORT}/health" | jq .
+
+cat > dev/ports.env <<ENV
+MCP_PORT=$MCP_PORT
+AGENT_PORT=$AGENT_PORT
+ENV
+
+echo
+echo "Both up. mcp_tools_loaded above should list 7 tools."
+echo "  agent  http://127.0.0.1:${AGENT_PORT}/chat"
+echo "  mcp    http://127.0.0.1:${MCP_PORT}/mcp"
+echo "  logs   dev/agent.log  dev/mcp.log"
+echo "  stop   ./scripts/dev_down.sh"
+echo
+echo "Console (separate, so the auth mode stays an explicit choice):"
+echo "  python web/serve.py --no-auth     unsecured, straight to the agent"
+echo "  python web/serve.py               secured, needs dev/web.env filled in"
